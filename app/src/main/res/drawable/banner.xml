@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 320x180 launcher banner: a dark screen with light spilling from its left, top and right edges -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+    <path android:fillColor="#0E0F12" android:pathData="M0,0h320v180h-320z" />
+    <path android:fillColor="#3A1410" android:pathData="M40,28h18v124h-18z" />
+    <path android:fillColor="#123326" android:pathData="M58,16h204v18h-204z" />
+    <path android:fillColor="#10223F" android:pathData="M262,28h18v124h-18z" />
+    <path android:fillColor="#E8553E" android:pathData="M54,34h6v112h-6z" />
+    <path android:fillColor="#3BC98A" android:pathData="M60,30h200v6h-200z" />
+    <path android:fillColor="#4C8DF0" android:pathData="M260,34h6v112h-6z" />
+    <path android:fillColor="#1B1D22" android:pathData="M60,36h200v110h-200z" />
+    <path android:fillColor="#2A2D34" android:pathData="M140,150h40v6h-40z" />
+</vector>
