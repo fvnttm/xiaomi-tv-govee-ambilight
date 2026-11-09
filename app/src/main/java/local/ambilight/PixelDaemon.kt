@@ -17,8 +17,9 @@ import java.util.Locale
  * point per frame, so the segments are read round-robin, one point each, and every new value is emitted.
  *
  * Output on stdout:
- *   F rrggbb rrggbb ...   one colour per segment along the strip path:
- *                         left bottom->top, top left->right, right top->bottom, and with 4 sides bottom right->left
+ *   F z rrggbb rrggbb ... after each read: z is the segment just read (-1 if the read failed), then one colour
+ *                         per segment along the strip path: left bottom->top, top left->right, right top->bottom,
+ *                         and with 4 sides bottom right->left
  *   S <text>              stats, about once per second
  *   E <text>              a problem the service should show
  */
@@ -83,8 +84,8 @@ object PixelDaemon {
                     colours[s] = px
                 }
                 reads++
-                emit(buildString(8 * segments + 2) {
-                    append('F')
+                emit(buildString(8 * segments + 6) {
+                    append("F ").append(if (px == null) -1 else s)
                     for (c in colours) append(' ').append(String.format(Locale.ROOT, "%06x", c))
                 })
                 if (System.out.checkError()) return // the service closed the stream

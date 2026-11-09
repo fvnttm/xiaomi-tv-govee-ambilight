@@ -37,4 +37,5 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
     implementation("dev.mobile:dadb:2.0.0")
+    testImplementation("junit:junit:4.13.2")
 }

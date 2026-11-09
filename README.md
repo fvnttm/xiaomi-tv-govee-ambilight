@@ -31,13 +31,33 @@ been tried.
    - `GetPixelInfo` (code 49) for points near the edges, one point in the middle of each of 14 zones round the
      picture;
    - `CloseController` (code 5).
-4. **Colours.** `AmbilightService` turns the 14 zone colours into the strip's colours:
-   - a little extra saturation and a gamma lift for dark scenes;
-   - an optional subtitle filter for the two middle zones of the bottom edge;
-   - temporal easing, faster when brightening than when dimming;
-   - smooth (Hermite) interpolation between neighbouring zones for every LED.
-5. **Sending.** `Ddp` sends one DDP packet per new reading (about 45–50 per second) to UDP port 4048. It switches
-   WLED on and off through its JSON API (`POST /json/state`).
+4. **Colours.** Each zone reading goes through a little extra saturation and an optional subtitle filter (the
+   two middle zones of the bottom edge), then into `ColourEngine` (see below).
+5. **Sending.** A render thread sends a DDP frame every 1/60 s to UDP port 4048: the zone colours at that
+   moment, smooth (Hermite) interpolation between neighbouring zones for every LED, then the LED curve. `Ddp`
+   switches WLED on and off through its JSON API (`POST /json/state`).
+
+### Transitions and delay
+
+The hardware gives about one point per frame, so each of the 14 zones is read only every ~0.29 s. `ColourEngine`
+keeps the strip quick and smooth anyway:
+
+- **Fixed-time transitions.** A zone moves to its newest reading in 60 ms for big changes and fades to black, and
+  over up to 250 ms for small ones (noise, film grain, slow pans). R, G and B move by the same fraction, so the
+  colour goes in a straight line instead of changing hue on the way. A transition ends exactly on its target:
+  no long dim tail.
+- **Cut and fade prediction.** When two of the last three readings change brightness a lot the same way, the
+  zones not read yet get that change at once: their own hue at the new brightness, or the new scene's mean
+  colour if they were dark. Each takes its real colour when it is read.
+- **Picture values, LED curve at the end.** Transitions are computed on the picture's own (gamma-encoded) values,
+  so fades look even. Only the final output goes through an LED curve (gamma 2.0), so dark scenes stay dark.
+  WLED applies no gamma to realtime data by default, so leave that as it is.
+- **Black gate.** A zone goes off at or below 10 (of 255) and lights again only from 18, so it doesn't flicker at
+  the edge.
+
+From a full-screen change to 90 % on the output, measured by a simulation on the real `ColourEngine` with the
+TV's reading rhythm (`LatencySimulationTest`): median **80 ms**, worst **132 ms**. The previous smoothing gave
+356 ms and 398 ms. Add the way from the panel to the HAL (about a frame) and the network.
 
 ### The catch in `GetPixelInfo`
 
@@ -101,11 +121,16 @@ and ADB. The app's labels are in Polish.
   mapping to how the strip is mounted.
 - **Filtr napisów** (subtitle filter) stops white and yellow subtitles from lighting the middle of the bottom edge.
   It works with 4 sides only.
+- **Test opóźnienia** (latency test, 30 s) flips the screen between black and white 20 times. It shows the median
+  and worst time to the first reading that sees the change and to the colours sent to the strip reaching 90 %.
+  Add the network to the second number; to see the whole chain, film the TV and the strip with a phone in slow
+  motion during the test.
 
 ## Limitations
 
 - **Speed.** About 45–50 picture points per second (a hardware limit), so each of the 14 zones is read about 3
-  times a second. The easing in between keeps changes smooth; scene cuts show after roughly 0.2–0.4 s.
+  times a second. Cuts and fades react within about 0.1 s thanks to the prediction; a colour change in one spot
+  of the screen shows when its zone is read, on average after ~0.15 s.
 - **ADB.** Network debugging has to stay on. This TV turns it back on by itself after a restart.
   - Android withdraws the approval for a key after 7 days without use. If the TV hasn't been on for over a week,
     the approval dialog comes back.
@@ -113,7 +138,9 @@ and ADB. The app's labels are in Polish.
     `adb shell settings put global adb_allowed_connection_time 0`.
 - **Security.** Port 5555 is open on the local network; a new device always needs approval on the TV screen. The
   WLED JSON API is plain HTTP on the local network, so the app allows unencrypted traffic.
-- **UDP.** A lost packet is simply replaced by the next one, about 20 ms later. If the stream stops, WLED goes
+- **Wi-Fi.** Check the network from the TV: `adb shell ping -c 50 <esp-ip>`. Times above ~20 ms or big jumps
+  usually mean the ESP32 is saving power: in WLED, *Config → WiFi Setup*, tick **Disable WiFi sleep**.
+- **UDP.** A lost packet is simply replaced by the next one, about 17 ms later. If the stream stops, WLED goes
   back to its own state after its realtime timeout (2.5 s by default); the app switches WLED off in standby, when
   Ambilight is turned off and when the picture can't be read.
 - **Strip length.** Frames longer than 480 LEDs are split into several DDP packets; only 72 LEDs have been tried.
@@ -127,7 +154,9 @@ and ADB. The app's labels are in Polish.
 adb logcat -s Ambilight          # state: picture reading, strip, ADB, problems
 ```
 
-`PixelProbe` reads the given points with the given delay, which helps with another TV model. Turn Ambilight off in
+`PixelProbe` reads the given points with the given delay, which helps with another TV model. `HalProbe` tries
+other render HAL calls that could make reading faster: local-dimming block data, `WaitVsync`, and one-call-per-frame
+pipelined reads (`info`, `ldm <type> <count>`, `vsync <count>`, `pipe <count> <x,y> <x,y>`). Turn Ambilight off in
 the app first, so the daemon isn't using the same latch:
 
 ```bash

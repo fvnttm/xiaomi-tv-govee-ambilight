@@ -42,39 +42,15 @@ class AmbilightService : Service() {
     private var lastPreview = 0L
     private var lastFrameLog = 0L
 
-    private val smoothR = FloatArray(SEGMENTS)
-    private val smoothG = FloatArray(SEGMENTS)
-    private val smoothB = FloatArray(SEGMENTS)
-
-    private fun updateChannel(current: Float, target: Float): Float {
-        val diff = target - current
-        if (kotlin.math.abs(diff) < 0.25f) return target
-
-        // Continuous temporal easing across 50 FPS frames:
-        // Attack 0.26 reaches 90% in ~140ms (7 frames); Decay 0.20 reaches 90% in ~180ms.
-        // Glides seamlessly across the round-robin sampling period, completely eliminating
-        // discrete segment jumping while keeping total latency minimal.
-        val rate = if (diff > 0f) 0.26f else 0.20f
-        val step = diff * rate
-        val minStep = if (diff > 0f) 0.4f else -0.4f
-        return if (kotlin.math.abs(step) < 0.4f) {
-            if (diff > 0f) minOf(target, current + minStep) else maxOf(target, current + minStep)
-        } else {
-            current + step
-        }
-    }
+    /** Zone colours over time; fed by the session thread, read by the render thread. */
+    private val engine = ColourEngine(SEGMENTS)
+    @Volatile private var rendering = false
 
     /** Black frame and WLED off, so the strip doesn't fall back to its own preset when the stream stops. */
     private fun blackout() {
-        resetSmoothing()
+        engine.reset()
         ddp.sendBlack()
         ddp.setOff()
-    }
-
-    private fun resetSmoothing() {
-        smoothR.fill(0f)
-        smoothG.fill(0f)
-        smoothB.fill(0f)
     }
 
     private val screenReceiver = object : BroadcastReceiver() {
@@ -220,107 +196,94 @@ class AmbilightService : Service() {
             val frameMs = kotlin.math.ceil(1000.0 / display.refreshRate).toInt() + 2
             d.open(adb.daemonCommand(mode.physicalWidth, mode.physicalHeight, config.sides, frameMs)).use { stream ->
                 Status.set { it.copy(picture = "uruchamianie odczytu…") }
-                while (alive && screenOn && config.enabled) {
-                    val line = stream.source.readUtf8Line() ?: break
-                    when {
-                        line.startsWith("F ") -> onFrame(line)
-                        line.startsWith("S ") -> Status.set { it.copy(picture = describeStats(line)) }
-                        line.startsWith("E ") -> Status.set { it.copy(problem = line.substring(2)) }
+                engine.reset()
+                rendering = true
+                val renderer = thread(name = "render") { render() }
+                try {
+                    while (alive && screenOn && config.enabled) {
+                        val line = stream.source.readUtf8Line() ?: break
+                        when {
+                            line.startsWith("F ") -> onFrame(line)
+                            line.startsWith("S ") -> Status.set { it.copy(picture = describeStats(line)) }
+                            line.startsWith("E ") -> Status.set { it.copy(problem = line.substring(2)) }
+                        }
                     }
+                } finally {
+                    rendering = false
+                    renderer.join(500)
                 }
             }
         }
     }
 
+    /** "F z c0 c1 …": zone z was just read (-1: the read failed); c0… are the latest colours of all zones. */
     private fun onFrame(line: String) {
         val parts = line.split(' ')
-        if (parts.size != SEGMENTS + 1) return
-        val reverse = config.reverse
-        val offset = config.offset
-
-        val rawIn = IntArray(SEGMENTS) { p -> parts[p + 1].toInt(16) }
-        if (config.filterSubtitles && config.sides == 4) {
-            filterSubtitles(rawIn)
-        }
-
-        LatencyProbe.onRead(rawIn)
-        val raw = IntArray(SEGMENTS) { p -> enhance(rawIn[p]) }
-
-        // Continuous temporal easing on all 14 segment control points simultaneously:
-        for (p in 0 until SEGMENTS) {
-            val tr = (raw[p] shr 16 and 0xff).toFloat()
-            val tg = (raw[p] shr 8 and 0xff).toFloat()
-            val tb = (raw[p] and 0xff).toFloat()
-
-            smoothR[p] = updateChannel(smoothR[p], tr)
-            smoothG[p] = updateChannel(smoothG[p], tg)
-            smoothB[p] = updateChannel(smoothB[p], tb)
-        }
-
-        val smoothedRaw = IntArray(SEGMENTS) { p ->
-            (Math.round(smoothR[p]).coerceIn(0, 255) shl 16) or
-            (Math.round(smoothG[p]).coerceIn(0, 255) shl 8) or
-            Math.round(smoothB[p]).coerceIn(0, 255)
-        }
-
-        LatencyProbe.onOutput((0 until SEGMENTS).sumOf { p ->
-            maxOf(smoothR[p], smoothG[p], smoothB[p]).toDouble()
-        }.toFloat() / SEGMENTS / 255f)
-
-        // 3-tap spatial halo diffusion across neighboring segments for TV preview:
-        val edges = ArrayList<Int>(SEGMENTS)
-        for (p in 0 until SEGMENTS) {
-            val prev = smoothedRaw[(p - 1 + SEGMENTS) % SEGMENTS]
-            val curr = smoothedRaw[p]
-            val next = smoothedRaw[(p + 1) % SEGMENTS]
-            edges += blend3(prev, curr, next, 0.08f, 0.84f, 0.08f)
-        }
-
-        val sCount = SEGMENTS
-        val nLeds = config.ledCount
-        val leds = IntArray(nLeds)
-        val offsetLeds = offset.mod(nLeds)
-
-        if (testing()) {
-            ddp.sendTest(reverse, offset)
-        } else {
-            // High-resolution spatial Hermite interpolation directly from floating-point smooth buffers
-            for (i in 0 until nLeds) {
-                val u = ((i.toFloat() + 0.5f) / nLeds * sCount - 0.5f).mod(sCount.toFloat())
-                val i0 = Math.floor(u.toDouble()).toInt().mod(sCount)
-                val i1 = (i0 + 1).mod(sCount)
-                val frac = (u - Math.floor(u.toDouble())).toFloat()
-                val t = frac * frac * (3f - 2f * frac)
-                val w1 = 1f - t
-                val w2 = t
-
-                val r = Math.round(smoothR[i0] * w1 + smoothR[i1] * w2).coerceIn(0, 255)
-                val g = Math.round(smoothG[i0] * w1 + smoothG[i1] * w2).coerceIn(0, 255)
-                val b = Math.round(smoothB[i0] * w1 + smoothB[i1] * w2).coerceIn(0, 255)
-                val col = (r shl 16) or (g shl 8) or b
-
-                val targetIdx = ((if (reverse) nLeds - 1 - i else i) + offsetLeds).mod(nLeds)
-                leds[targetIdx] = col
-            }
-            ddp.sendFrame(leds)
-        }
+        if (parts.size != SEGMENTS + 2) return
+        val zone = parts[1].toIntOrNull() ?: return
+        val raw = IntArray(SEGMENTS) { p -> parts[p + 2].toInt(16) }
+        LatencyProbe.onRead(raw)
+        if (zone !in 0 until SEGMENTS) return
+        if (config.filterSubtitles && config.sides == 4) filterSubtitles(raw)
+        engine.onReading(zone, enhance(raw[zone]), SystemClock.elapsedRealtime())
 
         val now = SystemClock.elapsedRealtime()
         if (now - lastFrameLog > 10_000) {
             lastFrameLog = now
-            Log.d(TAG, "frame in=${line.substring(2)} leds=$nLeds ddp=ok")
-        }
-        if (now - lastPreview > 200) {
-            lastPreview = now
-            Status.set { it.copy(segments = edges, mode = if (testing()) "test segmentów" else "ambilight") }
+            Log.d(TAG, "frame in=${line.substring(2)}")
         }
     }
 
-    private fun blend3(c1: Int, c2: Int, c3: Int, w1: Float, w2: Float, w3: Float): Int {
-        val r = ((c1 shr 16 and 0xff) * w1 + (c2 shr 16 and 0xff) * w2 + (c3 shr 16 and 0xff) * w3).toInt().coerceIn(0, 255)
-        val g = ((c1 shr 8 and 0xff) * w1 + (c2 shr 8 and 0xff) * w2 + (c3 shr 8 and 0xff) * w3).toInt().coerceIn(0, 255)
-        val b = ((c1 and 0xff) * w1 + (c2 and 0xff) * w2 + (c3 and 0xff) * w3).toInt().coerceIn(0, 255)
-        return (r shl 16) or (g shl 8) or b
+    /**
+     * Sends the strip a frame every 1/60 s while a session runs: zone colours at this moment, interpolated for
+     * every LED, through the LED curve. Runs on its own clock, so transitions keep an even pace whatever the
+     * rhythm of the readings.
+     */
+    private fun render() {
+        val zoneColours = Array(SEGMENTS) { FloatArray(3) }
+        var next = System.nanoTime()
+        while (rendering) {
+            val now = SystemClock.elapsedRealtime()
+            if (testing()) {
+                ddp.sendTest(config.reverse, config.offset)
+            } else {
+                engine.current(now, zoneColours)
+                ddp.sendFrame(leds(zoneColours))
+                LatencyProbe.onOutput(
+                    zoneColours.sumOf { maxOf(it[0], it[1], it[2]).toDouble() }.toFloat() / SEGMENTS / 255f,
+                )
+            }
+            if (now - lastPreview > 200) {
+                lastPreview = now
+                val edges = zoneColours.map { c ->
+                    (Math.round(c[0]) shl 16) or (Math.round(c[1]) shl 8) or Math.round(c[2])
+                }
+                Status.set { it.copy(segments = edges, mode = if (testing()) "test segmentów" else "ambilight") }
+            }
+            next += FRAME_NS
+            val wait = next - System.nanoTime()
+            if (wait > 0) java.util.concurrent.locks.LockSupport.parkNanos(wait) else next = System.nanoTime()
+        }
+    }
+
+    /** Smooth (Hermite) interpolation between the two nearest zones for every LED, then the LED curve. */
+    private fun leds(zoneColours: Array<FloatArray>): IntArray {
+        val n = config.ledCount
+        val reverse = config.reverse
+        val offset = config.offset.mod(n)
+        val out = IntArray(n)
+        for (i in 0 until n) {
+            val u = ((i + 0.5f) / n * SEGMENTS - 0.5f).mod(SEGMENTS.toFloat())
+            val i0 = u.toInt().mod(SEGMENTS)
+            val i1 = (i0 + 1) % SEGMENTS
+            val f = u - u.toInt()
+            val t = f * f * (3f - 2f * f)
+            fun ch(c: Int) = ColourEngine.OUTPUT[
+                Math.round(zoneColours[i0][c] * (1f - t) + zoneColours[i1][c] * t).coerceIn(0, 255)
+            ]
+            out[((if (reverse) n - 1 - i else i) + offset).mod(n)] = (ch(0) shl 16) or (ch(1) shl 8) or ch(2)
+        }
+        return out
     }
 
     private fun blend2(c1: Int, c2: Int, w1: Float): Int {
@@ -402,26 +365,15 @@ class AmbilightService : Service() {
         return 0.299f * r + 0.587f * g + 0.114f * b
     }
 
-    /** Enhances saturation and applies a perceptual shadow lift so ambient zones cast a rich glow. */
+    /** A little more saturation; very dark colours keep theirs, so noise in black doesn't turn colourful. */
     private fun enhance(rgb: Int): Int {
         val r = (rgb shr 16 and 0xff).toFloat()
         val g = (rgb shr 8 and 0xff).toFloat()
         val b = (rgb and 0xff).toFloat()
         val maxCh = maxOf(r, g, b)
-        if (maxCh < 2.0f) return 0 // Clean black noise gate
-
-        // For dark pixels (maxCh < 10), preserve linear channels exactly to avoid crushing low levels.
-        // Above 10, smoothly ramp saturation up to SATURATION.
-        val sat = if (maxCh < 10f) {
-            1.0f + (SATURATION - 1.0f) * ((maxCh - 2f) / 8f).coerceIn(0f, 1f)
-        } else {
-            SATURATION
-        }
+        val sat = 1f + (SATURATION - 1f) * ((maxCh - 8f) / 24f).coerceIn(0f, 1f)
         val luma = 0.299f * r + 0.587f * g + 0.114f * b
-        fun ch(v: Float): Int {
-            val satVal = (luma + (v - luma) * sat).toInt().coerceIn(0, 255)
-            return BOOST_LUT[satVal]
-        }
+        fun ch(v: Float) = (luma + (v - luma) * sat).toInt().coerceIn(0, 255)
         return (ch(r) shl 16) or (ch(g) shl 8) or ch(b)
     }
 
@@ -470,14 +422,7 @@ class AmbilightService : Service() {
         const val ACTION_TEST = "local.ambilight.TEST"
         private const val SATURATION = 1.25f
 
-        /** Perceptual gamma 0.78 curve to lift ambient shadows and boost overall brightness. */
-        private val BOOST_LUT = IntArray(256) { i ->
-            if (i < 2) 0
-            else {
-                val norm = i / 255.0
-                val boosted = Math.pow(norm, 0.78) * 255.0
-                Math.round(boosted).toInt().coerceIn(0, 255)
-            }
-        }
+        /** The strip gets a frame every 1/60 s. */
+        private const val FRAME_NS = 16_666_667L
     }
 }

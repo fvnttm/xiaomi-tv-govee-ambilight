@@ -63,8 +63,10 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         startForegroundService(Intent(this, AmbilightService::class.java))
         val config = Config(this)
+        // For tests over ADB: am start -n local.ambilight/.MainActivity --es open picture|latency
+        val open = intent.getStringExtra("open")
         setContent {
-            Screen(config) {
+            Screen(config, open) {
                 startService(Intent(this, AmbilightService::class.java).setAction(AmbilightService.ACTION_TEST))
             }
         }
@@ -72,15 +74,15 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun Screen(config: Config, onTest: () -> Unit) {
+private fun Screen(config: Config, open: String?, onTest: () -> Unit) {
     val status by Status.state.collectAsState()
     var enabled by remember { mutableStateOf(config.enabled) }
     var reverse by remember { mutableStateOf(config.reverse) }
     var sides by remember { mutableIntStateOf(config.sides) }
     var filterSubtitles by remember { mutableStateOf(config.filterSubtitles) }
     var offset by remember { mutableIntStateOf(config.offset) }
-    var showPicture by remember { mutableStateOf(false) }
-    var showLatency by remember { mutableStateOf(false) }
+    var showPicture by remember { mutableStateOf(open == "picture") }
+    var showLatency by remember { mutableStateOf(open == "latency") }
     val first = remember { FocusRequester() }
     if (showPicture) {
         TestPicture { showPicture = false }
