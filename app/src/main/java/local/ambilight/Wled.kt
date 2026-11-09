@@ -16,6 +16,7 @@ data class WledDevice(val name: String, val ip: String, val leds: Int)
 /** WLED's JSON API (plain HTTP on the local network) and finding WLED devices with mDNS. Blocking calls. */
 object Wled {
     private const val TIMEOUT_MS = 1500
+    private const val MAX_INFO_BYTES = 64 * 1024
 
     fun isIpv4(s: String): Boolean {
         val parts = s.split('.')
@@ -28,8 +29,22 @@ object Wled {
         conn.connectTimeout = TIMEOUT_MS
         conn.readTimeout = TIMEOUT_MS
         try {
-            val json = JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
-            WledDevice(json.optString("name", "WLED"), ip, json.getJSONObject("leds").getInt("count"))
+            // Whatever answers at this address is not trusted: WLED's info is a few kB, so read no more than 64.
+            val body = ByteArray(MAX_INFO_BYTES + 1)
+            var length = 0
+            conn.inputStream.use { input ->
+                while (length < body.size) {
+                    val n = input.read(body, length, body.size - length)
+                    if (n < 0) break
+                    length += n
+                }
+            }
+            if (length > MAX_INFO_BYTES) {
+                null
+            } else {
+                val json = JSONObject(String(body, 0, length))
+                WledDevice(json.optString("name", "WLED"), ip, json.getJSONObject("leds").getInt("count"))
+            }
         } finally {
             conn.disconnect()
         }
