@@ -33,7 +33,7 @@ been tried.
    - `CloseController` (code 5).
 4. **Colours.** Each zone reading goes through a little extra saturation and an optional subtitle filter (the
    two middle zones of the bottom edge), then into `ColourEngine` (see below).
-5. **Sending.** A render thread sends a DDP frame every 1/60 s to UDP port 4048: the zone colours at that
+5. **Sending.** A render thread sends a DDP frame every 1/120 s to UDP port 4048: the zone colours at that
    moment, smooth (Hermite) interpolation between neighbouring zones for every LED, then the LED curve. `Ddp`
    switches WLED on and off through its JSON API (`POST /json/state`).
 
@@ -42,8 +42,8 @@ been tried.
 The hardware gives about one point per frame, so each of the 14 zones is read only every ~0.29 s. `ColourEngine`
 keeps the strip quick and smooth anyway:
 
-- **Fixed-time transitions.** A zone moves to its newest reading in 60 ms for big changes and fades to black, and
-  over up to 250 ms for small ones (noise, film grain, slow pans). R, G and B move by the same fraction, so the
+- **Fixed-time transitions.** A zone moves to its newest reading in 20 ms for big changes and fades to black, and
+  over up to 200 ms for small ones (noise, film grain, slow pans). R, G and B move by the same fraction, so the
   colour goes in a straight line instead of changing hue on the way. A transition ends exactly on its target:
   no long dim tail.
 - **Cut and fade prediction.** When two of the last three readings change brightness a lot the same way, the
@@ -56,8 +56,8 @@ keeps the strip quick and smooth anyway:
   the edge.
 
 From a full-screen change to 90 % on the output, measured by a simulation on the real `ColourEngine` with the
-TV's reading rhythm (`LatencySimulationTest`): median **80 ms**, worst **132 ms**. The previous smoothing gave
-356 ms and 398 ms. Add the way from the panel to the HAL (about a frame) and the network.
+TV's reading rhythm (`LatencySimulationTest`): median **48 ms**, worst **62 ms** (60 ms transitions and 60 packets a second gave 80 ms; the first smoothing
+356 ms). Add the way from the panel to the HAL (about a frame) and the network.
 
 ### The catch in `GetPixelInfo`
 
@@ -140,7 +140,7 @@ and ADB. The app's labels are in Polish.
   WLED JSON API is plain HTTP on the local network, so the app allows unencrypted traffic.
 - **Wi-Fi.** Check the network from the TV: `adb shell ping -c 50 <esp-ip>`. Times above ~20 ms or big jumps
   usually mean the ESP32 is saving power: in WLED, *Config → WiFi Setup*, tick **Disable WiFi sleep**.
-- **UDP.** A lost packet is simply replaced by the next one, about 17 ms later. If the stream stops, WLED goes
+- **UDP.** A lost packet is simply replaced by the next one, about 8 ms later. If the stream stops, WLED goes
   back to its own state after its realtime timeout (2.5 s by default); the app switches WLED off in standby, when
   Ambilight is turned off and when the picture can't be read.
 - **Strip length.** Frames longer than 480 LEDs are split into several DDP packets; only 72 LEDs have been tried.

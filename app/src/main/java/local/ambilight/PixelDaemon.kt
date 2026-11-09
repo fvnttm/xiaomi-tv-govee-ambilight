@@ -33,6 +33,7 @@ object PixelDaemon {
     private const val DARK = 24
     /** How often the black-bar probes run; they take one read per round, so they never stall the stream. */
     private const val BAR_CHECK_MS = 20_000L
+    private const val HEX = "0123456789abcdef"
 
     private lateinit var hal: IBinder
     private var controller = 0
@@ -53,6 +54,8 @@ object PixelDaemon {
             return
         }
         hal = service
+        // Wake on time after each one-frame sleep (init allows every process nice down to -20).
+        runCatching { android.os.Process.setThreadPriority(-10) }
         controller = openController()
         Runtime.getRuntime().addShutdownHook(Thread { runCatching { closeController() } })
         try {
@@ -74,6 +77,7 @@ object PixelDaemon {
         var reads = 0
         var failed = 0
         var statsStart = System.nanoTime()
+        val line = StringBuilder(8 * segments + 6)
 
         while (true) {
             for (s in 0 until segments) {
@@ -84,10 +88,13 @@ object PixelDaemon {
                     colours[s] = px
                 }
                 reads++
-                emit(buildString(8 * segments + 6) {
-                    append("F ").append(if (px == null) -1 else s)
-                    for (c in colours) append(' ').append(String.format(Locale.ROOT, "%06x", c))
-                })
+                line.setLength(0)
+                line.append("F ").append(if (px == null) -1 else s)
+                for (c in colours) {
+                    line.append(' ')
+                    for (shift in 20 downTo 0 step 4) line.append(HEX[c shr shift and 0xf])
+                }
+                emit(line.toString())
                 if (System.out.checkError()) return // the service closed the stream
             }
 

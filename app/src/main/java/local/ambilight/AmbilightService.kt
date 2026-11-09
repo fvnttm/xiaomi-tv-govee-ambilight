@@ -12,6 +12,7 @@ import android.content.SharedPreferences
 import android.content.pm.ServiceInfo
 import android.hardware.display.DisplayManager
 import android.os.PowerManager
+import android.os.Process
 import android.os.SystemClock
 import android.util.Log
 import android.view.Display
@@ -120,6 +121,8 @@ class AmbilightService : Service() {
     }
 
     private fun supervise() {
+        // This thread also reads the daemon's stream: it must not wait behind the UI or background work.
+        runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY) }
         var backoff = 2_000L
         while (alive) {
             when {
@@ -235,11 +238,12 @@ class AmbilightService : Service() {
     }
 
     /**
-     * Sends the strip a frame every 1/60 s while a session runs: zone colours at this moment, interpolated for
+     * Sends the strip a frame every 1/120 s while a session runs: zone colours at this moment, interpolated for
      * every LED, through the LED curve. Runs on its own clock, so transitions keep an even pace whatever the
      * rhythm of the readings.
      */
     private fun render() {
+        runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY) }
         val zoneColours = Array(SEGMENTS) { FloatArray(3) }
         var next = System.nanoTime()
         while (rendering) {
@@ -422,7 +426,7 @@ class AmbilightService : Service() {
         const val ACTION_TEST = "local.ambilight.TEST"
         private const val SATURATION = 1.25f
 
-        /** The strip gets a frame every 1/60 s. */
-        private const val FRAME_NS = 16_666_667L
+        /** The strip gets a frame every 1/120 s: a new reading waits 4 ms on average for the next packet. */
+        private const val FRAME_NS = 8_333_333L
     }
 }

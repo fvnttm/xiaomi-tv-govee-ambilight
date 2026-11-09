@@ -19,6 +19,7 @@ class LatencySimulationTest {
         val results = ArrayList<Long>()
         var white = false
         var flipAt = 500L + rnd.nextLong(READ_MS)
+        var flippedAt = 0L
         var pending = false
         var zone = 0
         var nextRead = 0L
@@ -26,6 +27,7 @@ class LatencySimulationTest {
             if (t == flipAt) {
                 white = !white
                 pending = true
+                flippedAt = t
                 flipAt += 1_500 + rnd.nextLong(-40, 40)
             }
             if (t == nextRead) {
@@ -33,11 +35,11 @@ class LatencySimulationTest {
                 zone = (zone + 1) % zones
                 nextRead += READ_MS
             }
-            if (pending && t % 16 == 0L) {
+            if (pending && t % SEND_MS == 0L) {
                 engine.current(t, out)
                 val level = out.sumOf { maxOf(it[0], it[1], it[2]).toDouble() } / zones / 255
                 if (if (white) level >= 0.9 else level <= 0.1) {
-                    results += t - (flipAt - 1_500)
+                    results += t - flippedAt
                     pending = false
                 }
             }
@@ -52,12 +54,14 @@ class LatencySimulationTest {
         val worst = all.last()
         println("simulated reading→output 90%: median $median ms, max $worst ms over ${all.size} flips")
         // Before: ~0.3–0.7 s. With cut prediction a full-screen change needs two jumping readings plus FAST_MS.
-        assertTrue("median $median ms", median <= 150)
-        assertTrue("max $worst ms", worst <= 200)
+        assertTrue("median $median ms", median <= 60)
+        assertTrue("max $worst ms", worst <= 80)
     }
 
     companion object {
         /** One read per displayed frame plus margin: ceil(1000/60) + 2 ms, plus ~2 ms for the two HAL calls. */
         const val READ_MS = 21L
+        /** The render thread sends a frame every 1/120 s. */
+        const val SEND_MS = 8L
     }
 }

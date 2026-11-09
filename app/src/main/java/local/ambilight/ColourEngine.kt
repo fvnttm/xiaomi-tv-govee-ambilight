@@ -11,7 +11,7 @@ import kotlin.math.abs
  *
  * Each zone moves from where it is to its newest reading in a fixed time, the same fraction for R, G and B (so
  * the colour moves in a straight line and does not change hue on the way):
- *  - big changes and fades to black take [FAST_MS];
+ *  - big changes and fades to black take [FAST_MS] (about one displayed frame: as good as at once);
  *  - small changes (noise, grain, slow pans) are spread over up to [SLOW_MS].
  *
  * Zones are read one after another, about 3 times a second each. When several fresh readings in a row change
@@ -35,6 +35,8 @@ class ColourEngine(private val zones: Int) {
     private data class Change(val zone: Int, val at: Long, val oldLuma: Float, val newLuma: Float, val colour: Int)
     private val recent = ArrayDeque<Change>()
     private var lastCutAt = Long.MIN_VALUE / 2
+    /** When the change behind the last cut began: zones last read before it were given its prediction. */
+    private var lastCutSince = Long.MIN_VALUE
 
     @Synchronized
     fun reset() {
@@ -44,6 +46,8 @@ class ColourEngine(private val zones: Int) {
             lastReading[z] = -1; readAt[z] = Long.MIN_VALUE; dark[z] = true
         }
         recent.clear()
+        lastCutAt = Long.MIN_VALUE / 2
+        lastCutSince = Long.MIN_VALUE
     }
 
     /** A new reading [colour] (0xRRGGBB, after saturation) of [zone] at time [now] (ms). */
@@ -51,10 +55,13 @@ class ColourEngine(private val zones: Int) {
     fun onReading(zone: Int, colour: Int, now: Long) {
         val gated = blackGate(zone, colour)
         val previous = lastReading[zone]
+        val previousAt = readAt[zone]
         lastReading[zone] = gated
         readAt[zone] = now
 
-        if (previous >= 0) detectCut(zone, luma(previous), gated, now)
+        // A zone whose last reading is older than the last cut is only catching up with it: its jump is that
+        // same cut, not a new one (counting it would apply the cut's brightness change a second time).
+        if (previous >= 0 && previousAt >= lastCutSince) detectCut(zone, luma(previous), gated, now)
 
         val cur = currentOf(zone, now)
         val target = rgb(gated)
@@ -118,6 +125,7 @@ class ColourEngine(private val zones: Int) {
         recent.clear()
 
         val since = cut.minOf { it.at }
+        lastCutSince = since
         val oldMean = cut.map { it.oldLuma }.average().toFloat()
         val newMean = cut.map { it.newLuma }.average().toFloat()
         val toBlack = newMean <= BLACK_ON
@@ -138,10 +146,10 @@ class ColourEngine(private val zones: Int) {
     }
 
     companion object {
-        const val FAST_MS = 60L
-        const val SLOW_MS = 250L
+        const val FAST_MS = 20L
+        const val SLOW_MS = 200L
         /** Per-channel difference (0..255) from which a change counts as big... */
-        const val BIG = 32f
+        const val BIG = 24f
         /** ...and up to which it counts as noise. */
         const val SMALL = 6f
         /** Below or at this the zone goes off... */
@@ -154,7 +162,7 @@ class ColourEngine(private val zones: Int) {
         const val CUT_WINDOW = 3
         const val CUT_READINGS = 2
         /** After a cut, the next one can be detected only after this long. */
-        const val CUT_HOLD_MS = 120L
+        const val CUT_HOLD_MS = 40L
         const val MIN_RATIO = 0.1f
         const val MAX_RATIO = 3f
 

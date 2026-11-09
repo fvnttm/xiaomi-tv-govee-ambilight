@@ -36,7 +36,7 @@ class ColourEngineTest {
     fun colourMovesInAStraightLine() {
         engine.onReading(0, 0xc80000, 0)
         engine.onReading(0, 0x0000c8, 1_000)
-        for (t in listOf(1_005L, 1_020L, 1_040L, 1_055L)) {
+        for (t in listOf(1_002L, 1_007L, 1_013L, 1_018L)) {
             val c = at(t, 0)
             assertEquals("red + blue stays 200 at $t", 200f, c[0] + c[2], 0.01f)
             assertEquals(0f, c[1], 0.01f)
@@ -90,6 +90,18 @@ class ColourEngineTest {
         engine.onReading(1, 0x000000, t + 1_020)
         engine.onReading(2, 0x0000c8, t + 1_040) // zone 2 really turned blue
         assertEquals(200f, at(t + 1_040 + FAST_MS, 2)[2], 0.01f)
+    }
+
+    @Test
+    fun zonesCatchingUpWithACutAreNotASecondCut() {
+        var t = readAll(0x282828, 0) + 1_000 // 40
+        for (z in 0 until zones) { // the whole picture turns to 120, read zone by zone
+            engine.onReading(z, 0x787878, t)
+            t += 20
+        }
+        for (z in 0 until zones) {
+            assertEquals("zone $z stays at its reading", 120f, at(t + 500, z)[0], 0.01f)
+        }
     }
 
     @Test
