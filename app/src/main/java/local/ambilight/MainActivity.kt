@@ -95,7 +95,7 @@ private fun Screen(config: Config, onTest: () -> Unit) {
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Ambilight", color = TextPrimary, fontSize = 30.sp, fontWeight = FontWeight.Medium)
             Spacer(Modifier.height(4.dp))
-            TvPreview(status.segments, sides, reverse, offset)
+            TvPreview(status.segments, sides)
             Spacer(Modifier.height(12.dp))
             StatusLine("Tryb", status.mode)
             StatusLine("Obraz", status.picture)
@@ -131,9 +131,9 @@ private fun Screen(config: Config, onTest: () -> Unit) {
             Setting("Test segmentów", "60 s", onClick = onTest)
             Setting("Obraz testowy", "pokaż") { showPicture = true }
             Text(
-                "Test segmentów zapala 1 na czerwono, 2 na żółto (kierunek), 8 na zielono i ostatni, 14, na fioletowo; " +
-                    "powinny wypaść przy liczbach na podglądzie. Obraz testowy ma krawędzie: lewa czerwona, " +
-                    "góra zielona, prawa niebieska, dół żółty.",
+                "Test segmentów zapala strefę 1 na czerwono, 2 na żółto (kierunek), 8 na zielono i 14 na fioletowo. " +
+                    "Ustaw kierunek i przesunięcie tak, żeby kolory wypadły przy liczbach na podglądzie. " +
+                    "Obraz testowy ma krawędzie: lewa czerwona, góra zielona, prawa niebieska, dół żółty.",
                 color = TextMuted,
                 fontSize = 13.sp,
                 lineHeight = 18.sp,
@@ -143,11 +143,12 @@ private fun Screen(config: Config, onTest: () -> Unit) {
 }
 
 /**
- * The picture edges the strip follows, in the order the colours are read: up the left, across the top, down the right.
- * Labels 1, 8 and 15 mark where those strip segments sit with the current direction and offset (the test lights them).
+ * The picture zones the strip follows, in the order the colours are read: up the left, across the top, down the
+ * right (and along the bottom with 4 sides). Labels 1, 8 and 14 mark the zones the segment test lights; the test
+ * goes through the strip's direction and offset, so with the right settings its colours appear at these labels.
  */
 @Composable
-private fun TvPreview(edges: List<Int>, sides: Int, reverse: Boolean, offset: Int) {
+private fun TvPreview(edges: List<Int>, sides: Int) {
     val measurer = rememberTextMeasurer()
     // Inner screen about 16:9 with four sides (238 x 132 dp).
     Canvas(Modifier.size(width = 300.dp, height = 194.dp)) {
@@ -168,11 +169,9 @@ private fun TvPreview(edges: List<Int>, sides: Int, reverse: Boolean, offset: In
             val lit = maxOf(c shr 16 and 0xff, c shr 8 and 0xff, c and 0xff) > 0x38
             if (lit) drawEdgeSpan(from, to, screen, origin, band, gap, Color(0xFF000000.toInt() or c))
         }
-        for (segment in listOf(0, 7, n - 1)) {
-            val q = (segment - offset).mod(n)
-            val p = if (reverse) n - 1 - q else q
-            val at = labelPoint(path * (p + 0.5f) / n, screen, origin, ring - margin / 2)
-            val text = measurer.measure("${segment + 1}", TextStyle(color = TextMuted, fontSize = 11.sp))
+        for (zone in listOf(0, 7, n - 1)) {
+            val at = labelPoint(path * (zone + 0.5f) / n, screen, origin, ring - margin / 2)
+            val text = measurer.measure("${zone + 1}", TextStyle(color = TextMuted, fontSize = 11.sp))
             drawText(text, topLeft = at - Offset(text.size.width / 2f, text.size.height / 2f))
         }
     }

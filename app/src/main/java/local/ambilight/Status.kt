@@ -11,7 +11,7 @@ object Status {
         val strip: String = "—",
         val mode: String = "—",
         val problem: String = "",
-        val segments: List<Int> = List(Govee.SEGMENTS) { 0 },
+        val segments: List<Int> = List(SEGMENTS) { 0 },
     )
 
     val state = MutableStateFlow(State())

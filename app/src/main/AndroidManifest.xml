@@ -3,23 +3,20 @@
 
     <!-- 127.0.0.1:5555: the TV's own adbd, used to start PixelDaemon as the shell user -->
     <uses-permission android:name="android.permission.INTERNET" />
-    <!-- Lets the connectedDevice foreground service start before Bluetooth permissions are granted -->
+    <!-- One of the permissions the connectedDevice foreground service type requires -->
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <uses-permission
-        android:name="android.permission.BLUETOOTH_SCAN"
-        android:usesPermissionFlags="neverForLocation" />
-    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
     <uses-feature android:name="android.software.leanback" android:required="false" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
-    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
 
+    <!-- usesCleartextTraffic: WLED's JSON API (switching the strip on and off) is plain HTTP on the local network -->
     <application
         android:allowBackup="false"
+        android:usesCleartextTraffic="true"
         android:banner="@drawable/banner"
         android:icon="@drawable/icon"
         android:label="@string/app_name"

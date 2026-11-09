@@ -1,143 +1,161 @@
-# Ambilight bez kamery: Xiaomi TV + Govee H605C
+# Camera-free ambilight: Xiaomi Google TV + WLED
 
-Aplikacja na Google TV, która steruje taśmą LED **Govee Envisual TV Backlight T2 (H605C)** na podstawie
-tego, co faktycznie jest na ekranie, bez kamery Govee i bez komputera.
+A Google TV app that drives an addressable LED strip behind the TV from the picture that is actually on screen:
+no camera, no PC, no HDMI capture box. The strip is run by [WLED](https://kno.wled.ge) on an ESP32, and the app
+sends it colours over the local network with DDP.
 
-Zamiast zrzutów ekranu czyta piksele ze **sprzętowego toru wyświetlania MediaTek** (HAL `IRender`). Ten tor
-widzi gotowy obraz idący na panel: aplikacje, wideo 4K i **wejścia HDMI** (np. konsolę). Nie obciąża przy tym
-GPU, więc nie spowalnia odtwarzania. Taśma dostaje kolory przez Bluetooth.
+Instead of taking screenshots, the app reads pixels from the **MediaTek display pipeline** (the `IRender` HAL).
+That is the finished picture going to the panel: apps, 4K video and **HDMI inputs** (a console, for example). It
+costs no GPU time, so playback doesn't slow down.
 
-> **English summary:** a Google TV app that drives a Govee H605C TV backlight from the actual picture, with no
-> camera and no PC. It reads output pixels through the MediaTek render HAL (sees apps, 4K video and HDMI
-> inputs, no GPU cost), running as the shell user via the TV's own ADB, and sends colours to the strip over BLE.
-> Starts with the TV, turns the strip off in standby. Tested on a Xiaomi TV S Pro Mini LED 65 (2026, MT9689,
-> Google TV / Android 14). Unofficial; uses undocumented vendor interfaces.
-
-## Sprawdzony sprzęt
+## Hardware it was tested on
 
 | | |
 |---|---|
-| Telewizor | Xiaomi TV S Pro Mini LED 65 (2026, „ladybird”), MediaTek MT9689, Google TV / Android 14 |
-| Taśma | Govee H605C (Envisual TV Backlight T2), montaż na 4 bokach |
+| TV | Xiaomi TV S Pro Mini LED 65 (2026, "ladybird"), MediaTek MT9689, Google TV / Android 14 |
+| Controller | ESP32-C3 running WLED 16.0.1 |
+| Strip | 72 addressable LEDs, mounted on all 4 sides |
 
-Inne telewizory z MediaTek i usługą `vendor.mediatek.hardware.render.IRender` mogą działać, ale tego nie sprawdzałem.
+Other TVs with MediaTek chips and the `vendor.mediatek.hardware.render.IRender` service may work, but haven't
+been tried.
 
-## Jak to działa
+## How it works
 
-1. **Autostart.** `BootReceiver` uruchamia `AmbilightService` po starcie TV i po aktualizacji aplikacji.
-   W czuwaniu usługa gasi taśmę, po wybudzeniu wznawia pracę.
-2. **Uprawnienia bez komputera.** Usługa łączy się z ADB telewizora pod `127.0.0.1:5555` (klient
-   [dadb](https://github.com/mobile-dev-inc/dadb)) własnym kluczem „Ambilight@TV” i uruchamia `PixelDaemon` przez
-   `app_process` jako użytkownik `shell`. Tylko taki proces może wołać HAL renderowania.
-3. **Odczyt obrazu.** `PixelDaemon` woła `IRender`:
-   - `OpenController` (kod 69);
-   - `GetPixelInfo` (kod 49) dla punktów przy krawędziach;
-   - `CloseController` (kod 5).
-4. **Kolory na taśmę.** `Govee` trzyma połączenie BLE z taśmą. Wysyła tylko zmiany, a segmenty o podobnym kolorze
-   łączy w jedną komendę (maska segmentów), mieszcząc się w ~38 komendach/s. Taśma przyjmuje ich ok. 45/s.
+1. **Starts on its own.** `BootReceiver` starts `AmbilightService` when the TV boots and after app updates. When
+   the TV goes into standby, the service sends a black frame and switches WLED off; when the TV wakes, it carries on.
+2. **Permissions without a PC.** The service connects to the TV's own ADB on `127.0.0.1:5555` (with
+   [dadb](https://github.com/mobile-dev-inc/dadb)) using its own key, "Ambilight@TV", and starts `PixelDaemon` as
+   the `shell` user with `app_process`. Only a process like that may call the render HAL.
+3. **Reading the picture.** `PixelDaemon` calls `IRender`:
+   - `OpenController` (code 69);
+   - `GetPixelInfo` (code 49) for points near the edges, one point in the middle of each of 14 zones round the
+     picture;
+   - `CloseController` (code 5).
+4. **Colours.** `AmbilightService` turns the 14 zone colours into the strip's colours:
+   - a little extra saturation and a gamma lift for dark scenes;
+   - an optional subtitle filter for the two middle zones of the bottom edge;
+   - temporal easing, faster when brightening than when dimming;
+   - smooth (Hermite) interpolation between neighbouring zones for every LED.
+5. **Sending.** `Ddp` sends one DDP packet per new reading (about 45–50 per second) to UDP port 4048. It switches
+   WLED on and off through its JSON API (`POST /json/state`).
 
-### Ważna właściwość `GetPixelInfo`
+### The catch in `GetPixelInfo`
 
-Sprzęt **zatrzaskuje pozycję raz na wyświetlaną klatkę** i zwraca piksel z pozycji zatrzaśniętej przy ostatnim
-vsync, czyli zwykle z *poprzedniego* wywołania. Dlatego każdy punkt jest pytany dwa razy, w odstępie jednej klatki:
-druga odpowiedź zawsze należy do tego punktu. Daje to ok. 45 punktów/s. Kilka kontrolerów nie pomaga, bo HAL zwraca
-ten sam uchwyt i jeden zatrzask.
+The hardware **latches the requested position once per displayed frame**. It returns the pixel at the position
+latched at the last vsync, which is usually the one from the *previous* call. So every point is asked for twice,
+one frame plus 2 ms apart: the second answer always belongs to that point. That allows about 45–50 points per
+second. More controllers don't help, because the HAL hands out the same handle and the same latch.
 
-Pozostałe zabezpieczenia w `PixelDaemon`:
-- każdy segment czyta po kolei 3 punkty wzdłuż swojego odcinka krawędzi i uśrednia je, odrzucając pojedynczy
-  odstający odczyt;
-- gdy kilka punktów skacze naraz (cięcie sceny), segmenty przyjmują nowy kolor od razu;
-- czarne pasy filmowe (2,39:1, 4:3) są wykrywane i pomijane.
+Letterbox and pillarbox bars (2.39:1 films, 4:3 pictures) are detected and skipped. The probes for them are spread
+over the normal readings, one per round, every 20 s, so they never stall the stream.
 
-### Dlaczego nie zwykłe przechwytywanie ekranu
+### Why not ordinary screen capture
 
-Pomiary na tym TV, statystyki SurfaceFlingera, 8 s na każdy wariant:
+Measured on this TV with SurfaceFlinger statistics, 8 s per method:
 
-| Metoda | Wideo 1080p | Wideo 4K | HDMI |
+| Method | 1080p video | 4K video | HDMI |
 |---|---|---|---|
-| MediaProjection / scrcpy (lustro ekranu) | każda klatka ekranu przez GPU, spóźnione klatki | **ekran ~4 kl./s** | czarny obraz |
-| Mały zrzut `ScreenCapture.captureDisplay` 64×36 | bez wpływu, 25/s | ~270 ms na zrzut, ekran ~9 kl./s | czarny obraz |
-| `PixelCopy` we własnym odtwarzaczu | bez wpływu | bez wpływu, ~3/s | — |
-| **`IRender.GetPixelInfo` (ta aplikacja)** | **bez wpływu** | **bez wpływu** | **działa** |
+| MediaProjection / scrcpy (screen mirroring) | every frame goes through the GPU, late frames | **screen drops to ~4 fps** | black picture |
+| Small `ScreenCapture.captureDisplay` 64×36 | no impact, 25/s | ~270 ms per capture, screen ~9 fps | black picture |
+| `PixelCopy` in your own player | no impact | no impact, ~3/s | — |
+| **`IRender.GetPixelInfo` (this app)** | **no impact** | **no impact** | **works** |
 
-## Instalacja
+## Setup
 
-1. Na TV włącz **opcje programisty** (Ustawienia → System → Informacje → 7× „Kompilacja”) oraz
-   **debugowanie USB i debugowanie sieciowe** (ADB na porcie 5555).
-2. Zbuduj i zainstaluj aplikację:
+### WLED
+
+1. Flash WLED to the ESP32 and set the LED count and data pin under *Config → LED Preferences*.
+2. Under *Config → Sync Interfaces → Realtime*, leave **Receive UDP realtime** on (it is on by default). DDP
+   arrives on port 4048.
+3. Give the ESP32 a fixed address (a DHCP reservation on the router).
+
+### The app
+
+The defaults are in `app/src/main/java/local/ambilight/Config.kt`: WLED at `192.168.0.189`, 72 LEDs, offset 3.
+There are no screens for the address and the LED count, so **change them there before building** if your setup is
+different.
+
+1. On the TV, turn on **Developer options** (Settings → System → About → press "Build" 7 times), then **USB
+   debugging and network debugging** (ADB on port 5555).
+2. Build and install the app:
    ```bash
    ./gradlew assembleRelease
-   adb connect <ip-telewizora>:5555
+   adb connect <tv-ip>:5555
    adb install app/build/outputs/apk/release/app-release.apk
    ```
-   Wydanie jest podpisane kluczem debug z Twojego komputera.
-3. Uruchom **Ambilight** z listy aplikacji. TV zapyta o zezwolenie na debugowanie dla **Ambilight@TV**:
-   zaznacz **„Zawsze zezwalaj”** i OK. Uprawnienia Bluetooth aplikacja nada sobie sama przez ADB.
-4. Zamknij aplikację **Govee Home** na telefonie (taśma przyjmuje jedno połączenie Bluetooth naraz).
+   The release build is signed with your computer's debug key.
+3. Open **Ambilight** from the app list. The TV asks whether to allow debugging for **Ambilight@TV**: tick
+   **"Always allow"** and press OK. The app grants itself the notification permission through ADB.
 
-## Kalibracja
+## Calibration
 
-Ekran aplikacji pokazuje podgląd kolorów wokół ekranu i stan (odczyt obrazu, taśma, ADB).
+The app's screen shows a preview of the colours round the screen and the state of the picture reading, the strip
+and ADB. The app's labels are in Polish.
 
-- **Test segmentów** (60 s) zapala:
-  - segment 1 na czerwono;
-  - segment 2 na żółto (pokazuje kierunek);
-  - segment 8 na zielono;
-  - ostatni, 14., na fioletowo.
+- **Test segmentów** (segment test, 60 s) lights picture zone 1 red, zone 2 yellow (it shows the direction),
+  zone 8 green and zone 14 purple; the rest of the strip glows dim blue. The pattern goes through the same
+  direction and offset as the picture, so when the settings are right, the colours appear next to the numbers 1, 8
+  and 14 on the preview. Zone 1 is the bottom of the left edge.
+- **Obraz testowy** (test picture) has coloured edges: left red, top green, right blue, bottom yellow.
+- **Kierunek taśmy** (strip direction), **Układ** (3 or 4 sides) and **Przesunięcie** (offset, ±1 LED) match the
+  mapping to how the strip is mounted.
+- **Filtr napisów** (subtitle filter) stops white and yellow subtitles from lighting the middle of the bottom edge.
+  It works with 4 sides only.
 
-  Kolory powinny wypaść przy liczbach 1, 8 i 14 na podglądzie.
-- **Obraz testowy** ma krawędzie: lewa czerwona, góra zielona, prawa niebieska, dół żółty.
-- **Kierunek taśmy**, **Układ** (3 lub 4 boki) i **Przesunięcie startu** (o jeden segment, ~26°) dopasowują
-  mapowanie do montażu.
+## Limitations
 
-U mnie wyszło: 4 boki, kierunek zwykły (taśma zaczyna się w lewym dolnym rogu i idzie w górę), przesunięcie 1.
-
-H605C według dokumentacji Govee ma 15 segmentów, ale na tej taśmie bit 15 nie zapala niczego, a segment 14
-styka się z segmentem 1. Dlatego aplikacja używa 14 segmentów (`Govee.SEGMENTS`).
-
-## Ograniczenia
-
-- **Prędkość.** Ok. 45 punktów obrazu na sekundę (limit sprzętu), więc każdy segment odświeża się ~3×/s.
-  Cięcia scen są widoczne po ~0,15–0,3 s, płynne przejścia trochę później.
-- **ADB.** Debugowanie sieciowe musi zostać włączone. Ten TV sam przywraca je po restarcie.
-  - Android unieważnia zgodę dla klucza po 7 dniach nieużywania. Jeśli TV nie był włączany przez ponad tydzień,
-    zgoda pojawi się ponownie.
-  - Opcjonalnie wyłączysz wygasanie tak (słabsze zabezpieczenie):
+- **Speed.** About 45–50 picture points per second (a hardware limit), so each of the 14 zones is read about 3
+  times a second. The easing in between keeps changes smooth; scene cuts show after roughly 0.2–0.4 s.
+- **ADB.** Network debugging has to stay on. This TV turns it back on by itself after a restart.
+  - Android withdraws the approval for a key after 7 days without use. If the TV hasn't been on for over a week,
+    the approval dialog comes back.
+  - You can turn that expiry off like this (weaker security):
     `adb shell settings put global adb_allowed_connection_time 0`.
-- **Bezpieczeństwo.** Port 5555 jest dostępny w sieci lokalnej. Nowe urządzenie zawsze wymaga zgody na ekranie TV.
-- **Niesprawdzone:** aplikacje z DRM (Netflix, Disney+), treści HDR i Dolby Vision.
-- **Nieudokumentowane API.** Interfejsy MediaTek i protokół BLE Govee nie są publiczne. Aktualizacja oprogramowania
-  TV może je zmienić; wtedy aplikacja oddaje taśmę kamerze Govee.
+- **Security.** Port 5555 is open on the local network; a new device always needs approval on the TV screen. The
+  WLED JSON API is plain HTTP on the local network, so the app allows unencrypted traffic.
+- **UDP.** A lost packet is simply replaced by the next one, about 20 ms later. If the stream stops, WLED goes
+  back to its own state after its realtime timeout (2.5 s by default); the app switches WLED off in standby, when
+  Ambilight is turned off and when the picture can't be read.
+- **Strip length.** Frames longer than 480 LEDs are split into several DDP packets; only 72 LEDs have been tried.
+- **Not tested:** apps with DRM (Netflix, Disney+), HDR and Dolby Vision content.
+- **Undocumented interfaces.** The MediaTek interfaces aren't public. A TV software update may change them; the
+  strip then stays off and the app shows the problem.
 
-## Diagnostyka
+## Diagnostics
 
 ```bash
-adb logcat -s Ambilight          # stan: odczyt obrazu, taśma, ADB, problemy
+adb logcat -s Ambilight          # state: picture reading, strip, ADB, problems
 ```
 
-`PixelProbe` czyta wskazane punkty z podanym odstępem, przydatne przy innym modelu TV. Najpierw wyłącz Ambilight
-w aplikacji, żeby demon nie korzystał z tego samego zatrzasku:
+`PixelProbe` reads the given points with the given delay, which helps with another TV model. Turn Ambilight off in
+the app first, so the daemon isn't using the same latch:
 
 ```bash
 APK=$(adb shell pm path local.ambilight | cut -d: -f2)
 adb shell "CLASSPATH=$APK app_process /system/bin local.ambilight.PixelProbe 50 3 100,540 3700,1080"
 ```
 
-## Protokół BLE Govee H605C (użyty tutaj)
+## DDP packet (as used here)
 
-Usługa `00010203-0405-0607-0809-0a0b0c0d1910`, zapis do `…2b11`, powiadomienia z `…2b10`.
-Pakiety mają 20 bajtów, a ostatni bajt to XOR pierwszych 19.
+UDP to port 4048. A 10-byte header, then 3 bytes (R, G, B) per LED.
 
-| Pakiet | Znaczenie |
+| Byte | Value |
 |---|---|
-| `33 05 15 01 RR GG BB 00 00 00 00 00 mLo mHi` | kolor dla maski segmentów |
-| `33 05 15 02 LL mLo mHi` | jasność (%) dla maski segmentów |
-| `33 04 LL` | jasność całej taśmy (%) |
-| `33 01 01` / `33 01 00` | włącz / wyłącz |
-| `aa 05` | odczyt trybu; odpowiedź `aa 05 00 …` to tryb kamery |
-| `33 05 00 …` (te same bajty co odpowiedź) | powrót do trybu kamery |
+| 0 | `0x41`: version 1, push (`0x40` on all but the last packet of a frame) |
+| 1 | sequence number, 1–15 |
+| 2 | `0x01`: RGB, 8 bits per channel |
+| 3 | `0x01`: destination, the display |
+| 4–7 | data offset in bytes, big-endian |
+| 8–9 | data length in bytes, big-endian |
 
-## Licencja
+## History
 
-MIT, zobacz [LICENSE](LICENSE). Projekt nieoficjalny, niezwiązany z Xiaomi, MediaTek ani Govee. Używasz na własną
-odpowiedzialność.
+The first version drove a Govee H605C (Envisual TV Backlight T2) over Bluetooth. Its BLE protocol topped out
+at about 45 commands per second for 14 segments. WLED and DDP support was contributed by
+[krzocha1119](https://github.com/krzocha1119), and the project now targets WLED only. The Govee version is in
+commit `a3b339d`.
+
+## License
+
+MIT, see [LICENSE](LICENSE). An unofficial project, not affiliated with Xiaomi, MediaTek or WLED. Use at your own
+risk.

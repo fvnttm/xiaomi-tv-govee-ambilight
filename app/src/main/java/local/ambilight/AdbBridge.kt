@@ -26,7 +26,7 @@ class AdbBridge(private val context: Context) {
     /** Grants the app's runtime permissions through the shell, so nothing has to be clicked on the TV. */
     fun grantPermissions(adb: Dadb) {
         val pkg = context.packageName
-        for (p in listOf("BLUETOOTH_SCAN", "BLUETOOTH_CONNECT", "POST_NOTIFICATIONS")) {
+        for (p in listOf("POST_NOTIFICATIONS")) {
             if (context.checkSelfPermission("android.permission.$p") != PackageManager.PERMISSION_GRANTED) {
                 adb.shell("pm grant $pkg android.permission.$p")
             }
@@ -40,6 +40,6 @@ class AdbBridge(private val context: Context) {
     fun daemonCommand(panelW: Int, panelH: Int, sides: Int, frameMs: Int): String {
         val apk = context.applicationInfo.sourceDir
         return "shell:CLASSPATH=$apk exec app_process /system/bin local.ambilight.PixelDaemon " +
-            "$panelW $panelH $sides ${Govee.SEGMENTS} $frameMs"
+            "$panelW $panelH $sides ${SEGMENTS} $frameMs"
     }
 }

@@ -20,10 +20,13 @@ import kotlin.concurrent.thread
 
 const val TAG = "Ambilight"
 
+/** Zones read round the picture edge; each LED is interpolated between the two nearest zones. */
+const val SEGMENTS = 14
+
 /**
  * Starts with the TV and keeps the strip following the picture:
- * PixelDaemon (shell, over the TV's own ADB) -> smoothing -> Govee (BLE).
- * With the TV in standby the strip is switched off; when the picture can't be read it goes back to the Govee camera.
+ * PixelDaemon (shell, over the TV's own ADB) -> smoothing -> WLED on an ESP32 (DDP over UDP).
+ * With the TV in standby, with Ambilight switched off, or when the picture can't be read, the strip is switched off.
  */
 class AmbilightService : Service() {
     private lateinit var config: Config
@@ -39,9 +42,9 @@ class AmbilightService : Service() {
     private var lastPreview = 0L
     private var lastFrameLog = 0L
 
-    private val smoothR = FloatArray(Govee.SEGMENTS)
-    private val smoothG = FloatArray(Govee.SEGMENTS)
-    private val smoothB = FloatArray(Govee.SEGMENTS)
+    private val smoothR = FloatArray(SEGMENTS)
+    private val smoothG = FloatArray(SEGMENTS)
+    private val smoothB = FloatArray(SEGMENTS)
 
     private fun updateChannel(current: Float, target: Float): Float {
         val diff = target - current
@@ -59,6 +62,13 @@ class AmbilightService : Service() {
         } else {
             current + step
         }
+    }
+
+    /** Black frame and WLED off, so the strip doesn't fall back to its own preset when the stream stops. */
+    private fun blackout() {
+        resetSmoothing()
+        ddp.sendBlack()
+        ddp.setOff()
     }
 
     private fun resetSmoothing() {
@@ -112,7 +122,8 @@ class AmbilightService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_TEST) {
             testUntil = SystemClock.elapsedRealtime() + 60_000
-            if (session == null) ddp.sendTest(config.reverse, config.offset)
+            // A running session shows the test from onFrame; otherwise wake the supervisor to show it.
+            synchronized(wake) { wake.notifyAll() }
         }
         return START_STICKY
     }
@@ -123,10 +134,12 @@ class AmbilightService : Service() {
         getSystemService(DisplayManager::class.java).unregisterDisplayListener(displayListener)
         unregisterReceiver(screenReceiver)
         restartSession()
-        resetSmoothing()
-        ddp.sendBlack()
-        ddp.setOff()
-        ddp.close()
+        // Network calls are not allowed on the main thread.
+        thread(name = "shutdown") {
+            ddp.sendBlack()
+            ddp.setOff()
+            ddp.close()
+        }
         super.onDestroy()
     }
 
@@ -135,9 +148,7 @@ class AmbilightService : Service() {
         while (alive) {
             when {
                 !config.enabled -> {
-                    resetSmoothing()
-                    ddp.sendBlack()
-                    ddp.setOff()
+                    blackout()
                     Status.set { it.copy(mode = "wyłączony") }
                     while (alive && !config.enabled) {
                         idle(60_000)
@@ -145,9 +156,7 @@ class AmbilightService : Service() {
                     continue
                 }
                 !screenOn -> {
-                    resetSmoothing()
-                    ddp.sendBlack()
-                    ddp.setOff()
+                    blackout()
                     Status.set { it.copy(mode = "TV w czuwaniu") }
                     while (alive && !screenOn) {
                         idle(60_000)
@@ -165,16 +174,29 @@ class AmbilightService : Service() {
             session = null
             if (!alive) break
             if (config.enabled && screenOn) {
-                if (testing()) {
-                    ddp.sendTest(config.reverse, config.offset)
-                    Status.set { it.copy(mode = "test segmentów") }
-                } else {
-                    resetSmoothing()
-                    ddp.sendBlack()
-                    ddp.setOff()
-                    Status.set { it.copy(mode = "brak odczytu obrazu") }
+                // Wait before reconnecting. The test pattern is resent every second, because WLED leaves
+                // realtime mode a few seconds after the last packet.
+                val retryAt = SystemClock.elapsedRealtime() + backoff
+                var dark = false
+                var testShown = false
+                while (alive && config.enabled && screenOn) {
+                    val left = retryAt - SystemClock.elapsedRealtime()
+                    if (left <= 0) break
+                    if (testing()) {
+                        if (!testShown) ddp.setOn()
+                        ddp.sendTest(config.reverse, config.offset)
+                        Status.set { it.copy(mode = "test segmentów") }
+                        testShown = true
+                        dark = false
+                        idle(minOf(left, 1_000))
+                    } else {
+                        if (!dark) blackout()
+                        dark = true
+                        testShown = false
+                        Status.set { it.copy(mode = "brak odczytu obrazu: taśma wyłączona") }
+                        idle(left)
+                    }
                 }
-                idle(backoff)
                 backoff = (backoff * 2).coerceAtMost(30_000)
             }
         }
@@ -192,8 +214,10 @@ class AmbilightService : Service() {
             ddp.setOn()
             val display = getSystemService(DisplayManager::class.java).getDisplay(Display.DEFAULT_DISPLAY)
             val mode = display.mode
-            // Frame duration rounded up to vsync boundary
-            val frameMs = kotlin.math.ceil(1000.0 / display.refreshRate).toInt()
+            // One displayed frame plus a margin: the HAL latches the position once per vsync, and asking again
+            // before the next vsync returns the previous point (measured; without the margin colours flicker).
+            // The session restarts when the refresh rate changes.
+            val frameMs = kotlin.math.ceil(1000.0 / display.refreshRate).toInt() + 2
             d.open(adb.daemonCommand(mode.physicalWidth, mode.physicalHeight, config.sides, frameMs)).use { stream ->
                 Status.set { it.copy(picture = "uruchamianie odczytu…") }
                 while (alive && screenOn && config.enabled) {
@@ -210,19 +234,19 @@ class AmbilightService : Service() {
 
     private fun onFrame(line: String) {
         val parts = line.split(' ')
-        if (parts.size != Govee.SEGMENTS + 1) return
+        if (parts.size != SEGMENTS + 1) return
         val reverse = config.reverse
         val offset = config.offset
 
-        val rawIn = IntArray(Govee.SEGMENTS) { p -> parts[p + 1].toInt(16) }
+        val rawIn = IntArray(SEGMENTS) { p -> parts[p + 1].toInt(16) }
         if (config.filterSubtitles && config.sides == 4) {
             filterSubtitles(rawIn)
         }
 
-        val raw = IntArray(Govee.SEGMENTS) { p -> enhance(rawIn[p]) }
+        val raw = IntArray(SEGMENTS) { p -> enhance(rawIn[p]) }
 
         // Continuous temporal easing on all 14 segment control points simultaneously:
-        for (p in 0 until Govee.SEGMENTS) {
+        for (p in 0 until SEGMENTS) {
             val tr = (raw[p] shr 16 and 0xff).toFloat()
             val tg = (raw[p] shr 8 and 0xff).toFloat()
             val tb = (raw[p] and 0xff).toFloat()
@@ -232,22 +256,22 @@ class AmbilightService : Service() {
             smoothB[p] = updateChannel(smoothB[p], tb)
         }
 
-        val smoothedRaw = IntArray(Govee.SEGMENTS) { p ->
+        val smoothedRaw = IntArray(SEGMENTS) { p ->
             (Math.round(smoothR[p]).coerceIn(0, 255) shl 16) or
             (Math.round(smoothG[p]).coerceIn(0, 255) shl 8) or
             Math.round(smoothB[p]).coerceIn(0, 255)
         }
 
         // 3-tap spatial halo diffusion across neighboring segments for TV preview:
-        val edges = ArrayList<Int>(Govee.SEGMENTS)
-        for (p in 0 until Govee.SEGMENTS) {
-            val prev = smoothedRaw[(p - 1 + Govee.SEGMENTS) % Govee.SEGMENTS]
+        val edges = ArrayList<Int>(SEGMENTS)
+        for (p in 0 until SEGMENTS) {
+            val prev = smoothedRaw[(p - 1 + SEGMENTS) % SEGMENTS]
             val curr = smoothedRaw[p]
-            val next = smoothedRaw[(p + 1) % Govee.SEGMENTS]
+            val next = smoothedRaw[(p + 1) % SEGMENTS]
             edges += blend3(prev, curr, next, 0.08f, 0.84f, 0.08f)
         }
 
-        val sCount = Govee.SEGMENTS
+        val sCount = SEGMENTS
         val nLeds = config.ledCount
         val leds = IntArray(nLeds)
         val offsetLeds = offset.mod(nLeds)
@@ -432,7 +456,7 @@ class AmbilightService : Service() {
         nm.createNotificationChannel(NotificationChannel("ambilight", "Ambilight", NotificationManager.IMPORTANCE_MIN))
         return Notification.Builder(this, "ambilight")
             .setContentTitle("Ambilight")
-            .setContentText("Taśma Govee podąża za obrazem")
+            .setContentText("Taśma LED podąża za obrazem")
             .setSmallIcon(R.drawable.icon)
             .build()
     }

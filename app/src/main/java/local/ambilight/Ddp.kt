@@ -4,26 +4,29 @@ import android.os.SystemClock
 import android.util.Log
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.HttpURLConnection
 import java.net.InetAddress
+import java.net.URL
+import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 
+/**
+ * Sends colours to WLED on an ESP32 with DDP (UDP port 4048), and switches WLED on and off through its
+ * JSON API. Frames and the on/off requests must not be sent from the main thread.
+ */
 class Ddp(private val config: Config) {
     private var socket: DatagramSocket? = null
     private var targetAddress: InetAddress? = null
     private var lastResolvedIp: String = ""
-    private var seq: Byte = 0
+    private var seq = 0
 
-    private var packetBuf = ByteArray(HEADER_SIZE + config.ledCount * 3)
+    private var packetBuf = ByteArray(0)
 
     private var framesSent = 0
     private var statsStart = SystemClock.elapsedRealtime()
 
-    init {
-        try {
-            socket = DatagramSocket()
-        } catch (e: Exception) {
-            Log.e(TAG, "DDP: failed to create DatagramSocket", e)
-        }
-    }
+    /** One thread, so on/off requests reach WLED in the order they were made. */
+    private val http = Executors.newSingleThreadExecutor { r -> Thread(r, "wled-http").apply { isDaemon = true } }
 
     private fun ensureSocket(): DatagramSocket? {
         val ip = config.espIp
@@ -40,143 +43,145 @@ class Ddp(private val config: Config) {
                 DatagramSocket().apply {
                     trafficClass = 0x10 // IPTOS_LOWDELAY: high priority queue on Linux & Wi-Fi WMM
                 }
-            } catch (e: Exception) { null }
+            } catch (e: Exception) {
+                Log.w(TAG, "DDP: cannot create socket", e)
+                null
+            }
         }
         return socket
     }
 
     /**
-     * Blasts a single DDP packet with RGB values over UDP to WLED.
+     * Sends one frame of RGB values, one per LED. A strip longer than [LEDS_PER_PACKET] is split into several
+     * packets with the DDP data offset set; only the last one has the push flag, so WLED shows the frame once.
      */
+    @Synchronized
     fun sendFrame(targets: IntArray) {
         val n = config.ledCount
         if (targets.size != n) return
 
-        if (packetBuf.size != HEADER_SIZE + n * 3) {
-            packetBuf = ByteArray(HEADER_SIZE + n * 3)
-        }
-
         val sock = ensureSocket() ?: return
         val addr = targetAddress ?: return
 
-        val dataLen = n * 3
+        var first = 0
+        while (first < n) {
+            val count = minOf(LEDS_PER_PACKET, n - first)
+            val dataLen = count * 3
+            val size = HEADER_SIZE + dataLen
+            if (packetBuf.size < size) packetBuf = ByteArray(HEADER_SIZE + LEDS_PER_PACKET * 3)
+            val last = first + count >= n
+            val dataOffset = first * 3
 
-        // 10-byte DDP v1 packet header
-        packetBuf[0] = 0x41.toByte() // Flags: V1 (0x40) | Push (0x01)
-        packetBuf[1] = seq++        // Sequence number (0-255)
-        packetBuf[2] = 0x01.toByte() // Data Type: 1 (RGB)
-        packetBuf[3] = 0x01.toByte() // Destination ID: 1 (Display)
-        packetBuf[4] = 0             // Offset (32-bit big-endian)
-        packetBuf[5] = 0
-        packetBuf[6] = 0
-        packetBuf[7] = 0
-        packetBuf[8] = ((dataLen shr 8) and 0xff).toByte()
-        packetBuf[9] = (dataLen and 0xff).toByte()
+            // 10-byte DDP v1 header
+            packetBuf[0] = (if (last) 0x41 else 0x40).toByte() // V1 (0x40) | Push (0x01) on the last packet
+            packetBuf[1] = (seq % 15 + 1).toByte() // sequence 1..15 (0 means "not used")
+            packetBuf[2] = 0x01.toByte() // data type: RGB, 8 bits per channel
+            packetBuf[3] = 0x01.toByte() // destination: the display
+            packetBuf[4] = (dataOffset shr 24 and 0xff).toByte()
+            packetBuf[5] = (dataOffset shr 16 and 0xff).toByte()
+            packetBuf[6] = (dataOffset shr 8 and 0xff).toByte()
+            packetBuf[7] = (dataOffset and 0xff).toByte()
+            packetBuf[8] = (dataLen shr 8 and 0xff).toByte()
+            packetBuf[9] = (dataLen and 0xff).toByte()
 
-        var ptr = HEADER_SIZE
-        for (i in 0 until n) {
-            val tCol = targets[i]
-            packetBuf[ptr++] = ((tCol shr 16) and 0xff).toByte()
-            packetBuf[ptr++] = ((tCol shr 8) and 0xff).toByte()
-            packetBuf[ptr++] = (tCol and 0xff).toByte()
+            var ptr = HEADER_SIZE
+            for (i in first until first + count) {
+                val c = targets[i]
+                packetBuf[ptr++] = (c shr 16 and 0xff).toByte()
+                packetBuf[ptr++] = (c shr 8 and 0xff).toByte()
+                packetBuf[ptr++] = (c and 0xff).toByte()
+            }
+
+            try {
+                sock.send(DatagramPacket(packetBuf, size, addr, PORT))
+            } catch (e: Exception) {
+                Log.w(TAG, "DDP send failed: ${e.message}")
+                return
+            }
+            first += count
         }
-
-        try {
-            val packet = DatagramPacket(packetBuf, packetBuf.size, addr, PORT)
-            sock.send(packet)
-            framesSent++
-        } catch (e: Exception) {
-            Log.w(TAG, "DDP send failed", e)
-        }
+        seq++
+        framesSent++
 
         val now = SystemClock.elapsedRealtime()
         if (now - statsStart >= 1000) {
             val fps = Math.round(framesSent * 1000.0 / (now - statsStart)).toInt()
-            Status.set { it.copy(strip = "WLED · $fps FPS (${config.espIp})") }
+            Status.set { it.copy(strip = "WLED · $fps kl./s (${config.espIp})") }
             framesSent = 0
             statsStart = now
         }
     }
 
-    /** Instantly turns off all LEDs when TV goes into standby or Ambilight is disabled. */
+    /** All LEDs black. */
     fun sendBlack() {
-        val n = config.ledCount
-        val black = IntArray(n) { 0 }
-        sendFrame(black)
+        sendFrame(IntArray(config.ledCount))
     }
 
-    /** Sends a calibration test pattern lighting up 1 (red), 2 (yellow), 8 (green), 14 (purple). */
+    /**
+     * Calibration pattern in picture zones: zone 1 red, 2 yellow (shows the direction), 8 green, 14 purple.
+     * It goes through the same direction and offset mapping as the picture, so with the right settings the
+     * colours appear next to the numbers 1, 8 and 14 on the preview.
+     */
     fun sendTest(reverse: Boolean, offset: Int) {
         val n = config.ledCount
-        val segments = 14
-        val ledsPerSeg = n / segments
-        val pattern = IntArray(n)
-
-        for (s in 0 until segments) {
-            val color = when (s) {
-                0 -> 0xFF0000 // Seg 1: Red
-                1 -> 0xFFFF00 // Seg 2: Yellow (direction)
-                7 -> 0x00FF00 // Seg 8: Green
-                13 -> 0xFF00FF // Seg 14: Purple
-                else -> 0x050510 // Dim blue ambient for the rest
-            }
-            val start = s * ledsPerSeg
-            val end = if (s == segments - 1) n else (s + 1) * ledsPerSeg
-            for (idx in start until end) {
-                pattern[idx] = color
-            }
-        }
-
         val mapped = IntArray(n)
         val offsetLeds = offset.mod(n)
         for (i in 0 until n) {
-            val out = ((if (reverse) n - 1 - i else i) + offsetLeds).mod(n)
-            mapped[out] = pattern[i]
+            val zone = ((i + 0.5f) * SEGMENTS / n).toInt().coerceIn(0, SEGMENTS - 1)
+            val colour = when (zone) {
+                0 -> 0xFF0000
+                1 -> 0xFFFF00
+                7 -> 0x00FF00
+                SEGMENTS - 1 -> 0xFF00FF
+                else -> 0x050510 // dim blue, so the rest of the strip shows it is in the test
+            }
+            mapped[((if (reverse) n - 1 - i else i) + offsetLeds).mod(n)] = colour
         }
         sendFrame(mapped)
     }
 
-    fun setOff() {
-        kotlin.concurrent.thread(isDaemon = true) {
-            runCatching {
-                val url = java.net.URL("http://${config.espIp}/json/state")
-                val conn = url.openConnection() as java.net.HttpURLConnection
+    fun setOff() = postState("""{"on":false,"bri":0}""")
+
+    fun setOn() = postState("""{"on":true,"bri":255,"transition":0}""")
+
+    private fun postState(json: String) {
+        val ip = config.espIp
+        val request = Runnable {
+            try {
+                val conn = URL("http://$ip/json/state").openConnection() as HttpURLConnection
                 conn.requestMethod = "POST"
                 conn.setRequestProperty("Content-Type", "application/json")
                 conn.connectTimeout = 1000
                 conn.readTimeout = 1000
                 conn.doOutput = true
-                conn.outputStream.use { it.write("{\"on\":false,\"bri\":0,\"ps\":1}".toByteArray()) }
-                conn.responseCode
+                conn.outputStream.use { it.write(json.toByteArray()) }
+                val code = conn.responseCode
                 conn.disconnect()
+                if (code != 200) Log.w(TAG, "WLED $json -> HTTP $code")
+            } catch (e: Exception) {
+                Log.w(TAG, "WLED $json failed: ${e.message}")
             }
+        }
+        try {
+            http.execute(request)
+        } catch (e: RejectedExecutionException) {
+            // close() already ran: the service is being destroyed
         }
     }
 
-    fun setOn() {
-        kotlin.concurrent.thread(isDaemon = true) {
-            runCatching {
-                val url = java.net.URL("http://${config.espIp}/json/state")
-                val conn = url.openConnection() as java.net.HttpURLConnection
-                conn.requestMethod = "POST"
-                conn.setRequestProperty("Content-Type", "application/json")
-                conn.connectTimeout = 1000
-                conn.readTimeout = 1000
-                conn.doOutput = true
-                conn.outputStream.use { it.write("{\"on\":true,\"bri\":255,\"transition\":0}".toByteArray()) }
-                conn.responseCode
-                conn.disconnect()
-            }
-        }
-    }
-
+    /** Closes the socket after the queued on/off requests have been sent. */
     fun close() {
-        runCatching { socket?.close() }
-        socket = null
+        http.shutdown()
+        synchronized(this) {
+            runCatching { socket?.close() }
+            socket = null
+        }
     }
 
     companion object {
         const val PORT = 4048
         const val HEADER_SIZE = 10
+        /** 1440 bytes of colour per packet, the most WLED takes in one DDP packet. */
+        const val LEDS_PER_PACKET = 480
     }
 }

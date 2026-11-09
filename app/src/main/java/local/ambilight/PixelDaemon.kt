@@ -30,7 +30,8 @@ object PixelDaemon {
 
     /** Below this luma a sample counts as black when looking for letterbox bars. */
     private const val DARK = 24
-    private const val BAR_CHECK_MS = 5_000L
+    /** How often the black-bar probes run; they take one read per round, so they never stall the stream. */
+    private const val BAR_CHECK_MS = 20_000L
 
     private lateinit var hal: IBinder
     private var controller = 0
@@ -68,7 +69,7 @@ object PixelDaemon {
         val probePoints = barProbePoints(w, h)
         val probeSamples = IntArray(probePoints.size)
         var probeIdx = -1
-        var nextBarCheck = System.currentTimeMillis() + 10_000L
+        var nextBarCheck = System.currentTimeMillis() + BAR_CHECK_MS / 2
         var reads = 0
         var failed = 0
         var statsStart = System.nanoTime()
@@ -105,7 +106,7 @@ object PixelDaemon {
                     }
                     candidate = seen
                     probeIdx = -1
-                    nextBarCheck = System.currentTimeMillis() + 20_000L
+                    nextBarCheck = System.currentTimeMillis() + BAR_CHECK_MS
                 }
             }
 

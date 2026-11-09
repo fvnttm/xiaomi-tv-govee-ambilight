@@ -16,7 +16,7 @@ class Config(context: Context) {
         get() = prefs.getBoolean("reverse", false)
         set(v) = prefs.edit().putBoolean("reverse", v).apply()
 
-    /** 4 = all round (this TV's strip); 3 = left, top, right. */
+    /** 4 = all round; 3 = left, top, right. */
     var sides: Int
         get() = prefs.getInt("sides", 4)
         set(v) = prefs.edit().putInt("sides", v).apply()
@@ -40,16 +40,8 @@ class Config(context: Context) {
     var ledCount: Int
         get() {
             val v = prefs.getInt("led_count", 72)
+            // An earlier build stored 216 for this strip; it has 72 LEDs.
             return if (v == 216) 72 else v
         }
         set(v) = prefs.edit().putInt("led_count", v).apply()
-
-    var goveeMac: String?
-        get() = prefs.getString("govee_mac", null)
-        set(v) = prefs.edit().putString("govee_mac", v).apply()
-
-    /** The strip's own camera-sync setting, captured from the strip, replayed to hand control back to the camera. */
-    var cameraFrame: String
-        get() = prefs.getString("camera_frame", null) ?: "330500000164003200646464640000"
-        set(v) = prefs.edit().putString("camera_frame", v).apply()
 }
