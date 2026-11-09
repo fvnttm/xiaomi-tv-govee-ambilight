@@ -45,13 +45,20 @@ class AmbilightService : Service() {
 
     private fun updateChannel(current: Float, target: Float): Float {
         val diff = target - current
-        val absDiff = kotlin.math.abs(diff)
-        if (absDiff < 1.0f) return target
-        // Instant response on scene cuts and fast dynamic shifts:
-        if (absDiff >= 60f) return target
-        // Ultra-fast responsive tracking on continuous motion:
-        val rate = if (diff > 0f) 0.85f else 0.75f
-        return current + diff * rate
+        if (kotlin.math.abs(diff) < 0.25f) return target
+
+        // Continuous temporal easing across 50 FPS frames:
+        // Attack 0.26 reaches 90% in ~140ms (7 frames); Decay 0.20 reaches 90% in ~180ms.
+        // Glides seamlessly across the round-robin sampling period, completely eliminating
+        // discrete segment jumping while keeping total latency minimal.
+        val rate = if (diff > 0f) 0.26f else 0.20f
+        val step = diff * rate
+        val minStep = if (diff > 0f) 0.4f else -0.4f
+        return if (kotlin.math.abs(step) < 0.4f) {
+            if (diff > 0f) minOf(target, current + minStep) else maxOf(target, current + minStep)
+        } else {
+            current + step
+        }
     }
 
     private fun resetSmoothing() {
@@ -250,7 +257,7 @@ class AmbilightService : Service() {
         } else {
             // High-resolution spatial Hermite interpolation directly from floating-point smooth buffers
             for (i in 0 until nLeds) {
-                val u = (i.toFloat() / nLeds) * sCount
+                val u = ((i.toFloat() + 0.5f) / nLeds * sCount - 0.5f).mod(sCount.toFloat())
                 val i0 = Math.floor(u.toDouble()).toInt().mod(sCount)
                 val i1 = (i0 + 1).mod(sCount)
                 val frac = (u - Math.floor(u.toDouble())).toFloat()
