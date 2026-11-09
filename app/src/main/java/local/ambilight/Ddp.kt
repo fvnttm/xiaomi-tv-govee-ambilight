@@ -36,7 +36,11 @@ class Ddp(private val config: Config) {
             }
         }
         if (socket == null || socket?.isClosed == true) {
-            socket = try { DatagramSocket() } catch (e: Exception) { null }
+            socket = try {
+                DatagramSocket().apply {
+                    trafficClass = 0x10 // IPTOS_LOWDELAY: high priority queue on Linux & Wi-Fi WMM
+                }
+            } catch (e: Exception) { null }
         }
         return socket
     }
@@ -159,7 +163,7 @@ class Ddp(private val config: Config) {
                 conn.connectTimeout = 1000
                 conn.readTimeout = 1000
                 conn.doOutput = true
-                conn.outputStream.use { it.write("{\"on\":true,\"bri\":255}".toByteArray()) }
+                conn.outputStream.use { it.write("{\"on\":true,\"bri\":255,\"transition\":0}".toByteArray()) }
                 conn.responseCode
                 conn.disconnect()
             }

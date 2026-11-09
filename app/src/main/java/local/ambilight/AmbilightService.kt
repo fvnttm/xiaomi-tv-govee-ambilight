@@ -45,15 +45,13 @@ class AmbilightService : Service() {
 
     private fun updateChannel(current: Float, target: Float): Float {
         val diff = target - current
-        if (kotlin.math.abs(diff) < 0.2f) return target
-        if (diff > 0f) {
-            val attack = if (diff > 120f) 0.22f else 0.16f
-            return current + diff * attack
-        } else {
-            val drop = -diff
-            val step = maxOf(drop * 0.12f, minOf(drop, 0.35f))
-            return maxOf(target, current - step)
-        }
+        val absDiff = kotlin.math.abs(diff)
+        if (absDiff < 1.0f) return target
+        // Instant response on scene cuts and fast dynamic shifts:
+        if (absDiff >= 60f) return target
+        // Ultra-fast responsive tracking on continuous motion:
+        val rate = if (diff > 0f) 0.85f else 0.75f
+        return current + diff * rate
     }
 
     private fun resetSmoothing() {
@@ -187,8 +185,8 @@ class AmbilightService : Service() {
             ddp.setOn()
             val display = getSystemService(DisplayManager::class.java).getDisplay(Display.DEFAULT_DISPLAY)
             val mode = display.mode
-            // Frame duration rounded up to vsync boundary + 2 ms margin
-            val frameMs = kotlin.math.ceil(1000.0 / display.refreshRate).toInt() + 2
+            // Frame duration rounded up to vsync boundary
+            val frameMs = kotlin.math.ceil(1000.0 / display.refreshRate).toInt()
             d.open(adb.daemonCommand(mode.physicalWidth, mode.physicalHeight, config.sides, frameMs)).use { stream ->
                 Status.set { it.copy(picture = "uruchamianie odczytu…") }
                 while (alive && screenOn && config.enabled) {
