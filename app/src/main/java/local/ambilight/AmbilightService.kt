@@ -243,6 +243,7 @@ class AmbilightService : Service() {
             filterSubtitles(rawIn)
         }
 
+        LatencyProbe.onRead(rawIn)
         val raw = IntArray(SEGMENTS) { p -> enhance(rawIn[p]) }
 
         // Continuous temporal easing on all 14 segment control points simultaneously:
@@ -261,6 +262,10 @@ class AmbilightService : Service() {
             (Math.round(smoothG[p]).coerceIn(0, 255) shl 8) or
             Math.round(smoothB[p]).coerceIn(0, 255)
         }
+
+        LatencyProbe.onOutput((0 until SEGMENTS).sumOf { p ->
+            maxOf(smoothR[p], smoothG[p], smoothB[p]).toDouble()
+        }.toFloat() / SEGMENTS / 255f)
 
         // 3-tap spatial halo diffusion across neighboring segments for TV preview:
         val edges = ArrayList<Int>(SEGMENTS)

@@ -28,6 +28,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -45,6 +46,7 @@ import androidx.compose.ui.unit.sp
 import androidx.tv.material3.ClickableSurfaceDefaults
 import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
+import kotlinx.coroutines.delay
 
 private val Background = Color(0xFF0E0F12)
 private val Panel = Color(0xFF17191E)
@@ -78,9 +80,14 @@ private fun Screen(config: Config, onTest: () -> Unit) {
     var filterSubtitles by remember { mutableStateOf(config.filterSubtitles) }
     var offset by remember { mutableIntStateOf(config.offset) }
     var showPicture by remember { mutableStateOf(false) }
+    var showLatency by remember { mutableStateOf(false) }
     val first = remember { FocusRequester() }
     if (showPicture) {
         TestPicture { showPicture = false }
+        return
+    }
+    if (showLatency) {
+        LatencyTest { showLatency = false }
         return
     }
     LaunchedEffect(Unit) { first.requestFocus() }
@@ -130,6 +137,7 @@ private fun Screen(config: Config, onTest: () -> Unit) {
             }
             Setting("Test segmentów", "60 s", onClick = onTest)
             Setting("Obraz testowy", "pokaż") { showPicture = true }
+            Setting("Test opóźnienia", "30 s") { showLatency = true }
             Text(
                 "Test segmentów zapala strefę 1 na czerwono, 2 na żółto (kierunek), 8 na zielono i 14 na fioletowo. " +
                     "Ustaw kierunek i przesunięcie tak, żeby kolory wypadły przy liczbach na podglądzie. " +
@@ -218,6 +226,39 @@ private fun TestPicture(onExit: () -> Unit) {
         Box(Modifier.fillMaxWidth().fillMaxHeight(0.15f).align(Alignment.TopCenter).background(Color(0xFF00FF00)))
         Box(Modifier.fillMaxWidth().fillMaxHeight(0.15f).align(Alignment.BottomCenter).background(Color(0xFFFFD000)))
         Text("Obraz testowy · Wstecz zamyka", Modifier.align(Alignment.Center), color = TextPrimary, fontSize = 18.sp)
+    }
+}
+
+/**
+ * Full screen flipping between black and white every 1.5 s for 30 s; LatencyProbe measures how long the reading
+ * and the strip take to follow. The results stay on screen until Back.
+ */
+@Composable
+private fun LatencyTest(onExit: () -> Unit) {
+    BackHandler(onBack = onExit)
+    val result by LatencyProbe.result.collectAsState()
+    var white by remember { mutableStateOf(false) }
+    var done by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        LatencyProbe.start()
+        delay(1_500) // settle on black first; this state is not measured
+        repeat(20) {
+            white = !white
+            // Taken at the start of the frame that draws the new colour.
+            withFrameNanos { LatencyProbe.flip(white) }
+            delay(1_500)
+        }
+        LatencyProbe.stop()
+        done = true
+    }
+    Box(Modifier.fillMaxSize().background(if (white && !done) Color.White else Color.Black)) {
+        val text = if (done) result.describe() + "\n\nWstecz zamyka" else "Test opóźnienia · ${result.flips}/20"
+        Text(
+            text,
+            Modifier.align(Alignment.Center).background(Color(0xFF303236), RoundedCornerShape(8.dp)).padding(16.dp),
+            color = TextPrimary,
+            fontSize = if (done) 18.sp else 12.sp,
+        )
     }
 }
 
