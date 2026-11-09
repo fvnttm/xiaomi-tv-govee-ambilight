@@ -75,6 +75,7 @@ private fun Screen(config: Config, onTest: () -> Unit) {
     var enabled by remember { mutableStateOf(config.enabled) }
     var reverse by remember { mutableStateOf(config.reverse) }
     var sides by remember { mutableIntStateOf(config.sides) }
+    var filterSubtitles by remember { mutableStateOf(config.filterSubtitles) }
     var offset by remember { mutableIntStateOf(config.offset) }
     var showPicture by remember { mutableStateOf(false) }
     val first = remember { FocusRequester() }
@@ -115,8 +116,16 @@ private fun Screen(config: Config, onTest: () -> Unit) {
                 sides = if (sides == 4) 3 else 4
                 config.sides = sides
             }
-            Setting("Przesunięcie startu", "$offset") {
-                offset = (offset + 1) % Govee.SEGMENTS
+            Setting("Filtr napisów", if (filterSubtitles) "włączony" else "wyłączony") {
+                filterSubtitles = !filterSubtitles
+                config.filterSubtitles = filterSubtitles
+            }
+            Setting("Przesunięcie (+1 dioda)", "$offset diod") {
+                offset = (offset + 1) % config.ledCount
+                config.offset = offset
+            }
+            Setting("Przesunięcie (-1 dioda)", "cofnij") {
+                offset = (offset - 1 + config.ledCount) % config.ledCount
                 config.offset = offset
             }
             Setting("Test segmentów", "60 s", onClick = onTest)
