@@ -12,6 +12,8 @@ object Status {
         val mode: String = "—",
         val problem: String = "",
         val segments: List<Int> = List(SEGMENTS) { 0 },
+        /** The segment test is lighting the strip. */
+        val testing: Boolean = false,
     )
 
     val state = MutableStateFlow(State())

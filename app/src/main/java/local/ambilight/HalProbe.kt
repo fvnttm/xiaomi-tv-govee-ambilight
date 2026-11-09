@@ -1,8 +1,5 @@
 package local.ambilight
 
-import android.os.IBinder
-import android.os.Parcel
-
 /**
  * Diagnostics for other render HAL calls that could make the picture reading faster. Run as the shell user:
  *   CLASSPATH=<apk> app_process /system/bin local.ambilight.HalProbe <mode> [args]
@@ -16,17 +13,13 @@ import android.os.Parcel
  * Unknown replies are printed as raw ints. Turn Ambilight off first, so the daemon doesn't share the latch.
  */
 object HalProbe {
-    private const val DESC = "vendor.mediatek.hardware.render.IRender"
-    private lateinit var hal: IBinder
     private var controller = 0
 
     @JvmStatic
     fun main(args: Array<String>) {
-        hal = Class.forName("android.os.ServiceManager").getMethod("getService", String::class.java)
-            .invoke(null, "$DESC/default") as IBinder
-        val open = call(69) { it.writeInt(1); it.writeInt(4) }
-        controller = open[3]
-        println("controller=$controller (open eRet=${open[2]})")
+        check(RenderHal.connect()) { "render HAL not found" }
+        controller = RenderHal.openController()
+        println("controller=$controller")
         try {
             when (args.getOrNull(0)) {
                 "info" -> info()
@@ -36,7 +29,7 @@ object HalProbe {
                 else -> println("modes: info | ldm <type> <count> | vsync <count> | pipe <count> <x,y> <x,y>")
             }
         } finally {
-            call(5) { it.writeInt(controller) }
+            RenderHal.closeController(controller)
         }
     }
 
@@ -115,9 +108,7 @@ object HalProbe {
             val p = if (k % 2 == 0) a else b
             waitVsync()
             val t = System.nanoTime()
-            val r = call(49) {
-                it.writeInt(controller); it.writeInt(1); it.writeInt(12); it.writeInt(p.first); it.writeInt(p.second)
-            }
+            val r = RenderHal.pixelRaw(controller, p.first, p.second)
             // 1, size, eRet, 1, size, 1, size, x, y, R, G, B
             println("#$k asked ${p.first},${p.second}  pos ${r.getOrNull(7)},${r.getOrNull(8)}  rgb %02x%02x%02x  t=%.1f ms".format(
                 (r.getOrElse(9) { 0 } and 0xffff).coerceAtMost(255),
@@ -127,19 +118,5 @@ object HalProbe {
         }
     }
 
-    /** Transacts and returns the reply (after the exception header) as ints. */
-    private fun call(code: Int, write: (Parcel) -> Unit): IntArray {
-        val data = Parcel.obtain(hal)
-        val reply = Parcel.obtain()
-        try {
-            data.writeInterfaceToken(DESC)
-            write(data)
-            hal.transact(code, data, reply, 0)
-            reply.readException()
-            return IntArray(reply.dataAvail() / 4) { reply.readInt() }
-        } finally {
-            data.recycle()
-            reply.recycle()
-        }
-    }
+    private fun call(code: Int, write: (android.os.Parcel) -> Unit) = RenderHal.ints(code, write)
 }

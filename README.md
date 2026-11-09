@@ -33,9 +33,11 @@ been tried.
    - `CloseController` (code 5).
 4. **Colours.** Each zone reading goes through a little extra saturation and an optional subtitle filter (the
    two middle zones of the bottom edge), then into `ColourEngine` (see below).
-5. **Sending.** A render thread sends a DDP frame every 1/120 s to UDP port 4048: the zone colours at that
-   moment, smooth (Hermite) interpolation between neighbouring zones for every LED, then the LED curve. `Ddp`
-   switches WLED on and off through its JSON API (`POST /json/state`).
+5. **Sending.** A render thread makes a frame every 1/120 s: the zone colours at that moment, smooth (Hermite)
+   interpolation between neighbouring zones for every LED, the LED curve, then the brightness setting. `Ddp`
+   sends it to UDP port 4048. A frame equal to the last one is sent twice more and then only every 250 ms, so
+   a still picture costs 4 packets a second. `Ddp` switches WLED on and off through its JSON API
+   (`POST /json/state`).
 
 ### Transitions and delay
 
@@ -91,10 +93,6 @@ Measured on this TV with SurfaceFlinger statistics, 8 s per method:
 
 ### The app
 
-The defaults are in `app/src/main/java/local/ambilight/Config.kt`: WLED at `192.168.0.189`, 72 LEDs, offset 3.
-There are no screens for the address and the LED count, so **change them there before building** if your setup is
-different.
-
 1. On the TV, turn on **Developer options** (Settings → System → About → press "Build" 7 times), then **USB
    debugging and network debugging** (ADB on port 5555).
 2. Build and install the app:
@@ -105,20 +103,25 @@ different.
    ```
    The release build is signed with your computer's debug key.
 3. Open **Ambilight** from the app list. The TV asks whether to allow debugging for **Ambilight@TV**: tick
-   **"Always allow"** and press OK. The app grants itself the notification permission through ADB.
+   **"Always allow"** and press OK. The app grants itself the notification permission through ADB. If the
+   dialog is dismissed or times out, the app asks again after about half a minute.
+4. Open **Sterownik WLED** (WLED controller). The app lists the WLED devices it finds on the network (mDNS);
+   pick yours, or type its address. The LED count is read from WLED.
 
 ## Calibration
 
 The app's screen shows a preview of the colours round the screen and the state of the picture reading, the strip
-and ADB. The app's labels are in Polish.
+and ADB, and explains the focused setting at the bottom. The app's labels are in Polish.
 
-- **Test segmentów** (segment test, 60 s) lights picture zone 1 red, zone 2 yellow (it shows the direction),
+- **Test segmentów** (segment test, 60 s; press again to end it) lights picture zone 1 red, zone 2 yellow (it shows the direction),
   zone 8 green and zone 14 purple; the rest of the strip glows dim blue. The pattern goes through the same
   direction and offset as the picture, so when the settings are right, the colours appear next to the numbers 1, 8
   and 14 on the preview. Zone 1 is the bottom of the left edge.
 - **Obraz testowy** (test picture) has coloured edges: left red, top green, right blue, bottom yellow.
-- **Kierunek taśmy** (strip direction), **Układ** (3 or 4 sides) and **Przesunięcie** (offset, ±1 LED) match the
-  mapping to how the strip is mounted.
+- **Kierunek** (strip direction), **Układ** (3 or 4 sides) and **Przesunięcie** (offset: left and right move
+  it by one LED) match the mapping to how the strip is mounted. **Liczba diod** is the LED count.
+- **Jasność** (brightness, 10–100 %) and **Reakcja** (response): *szybka* (fast) uses the 20 ms transitions,
+  *płynna* (smooth) 60 ms ones.
 - **Filtr napisów** (subtitle filter) stops white and yellow subtitles from lighting the middle of the bottom edge.
   It works with 4 sides only.
 - **Test opóźnienia** (latency test, 30 s) flips the screen between black and white 20 times. It shows the median

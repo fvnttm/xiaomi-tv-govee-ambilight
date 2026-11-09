@@ -11,8 +11,8 @@ android {
         minSdk = 31
         // 34: a connectedDevice foreground service may start from BOOT_COMPLETED without extra rules.
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
     }
     buildFeatures { compose = true }
     compileOptions {

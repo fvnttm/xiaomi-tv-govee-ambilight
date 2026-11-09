@@ -38,6 +38,16 @@ class ColourEngine(private val zones: Int) {
     /** When the change behind the last cut began: zones last read before it were given its prediction. */
     private var lastCutSince = Long.MIN_VALUE
 
+    private var fastMs = FAST_MS
+    private var slowMs = SLOW_MS
+
+    /** Softer transitions ([SMOOTH_FAST_MS], [SMOOTH_SLOW_MS]) instead of the fastest ones. */
+    @Synchronized
+    fun setSmooth(smooth: Boolean) {
+        fastMs = if (smooth) SMOOTH_FAST_MS else FAST_MS
+        slowMs = if (smooth) SMOOTH_SLOW_MS else SLOW_MS
+    }
+
     @Synchronized
     fun reset() {
         for (z in 0 until zones) {
@@ -67,10 +77,10 @@ class ColourEngine(private val zones: Int) {
         val target = rgb(gated)
         val d = maxOf(abs(target[0] - cur[0]), abs(target[1] - cur[1]), abs(target[2] - cur[2]))
         val ms = when {
-            gated == 0 -> FAST_MS
-            d >= BIG -> FAST_MS
-            d <= SMALL -> SLOW_MS
-            else -> SLOW_MS + ((d - SMALL) / (BIG - SMALL) * (FAST_MS - SLOW_MS)).toLong()
+            gated == 0 -> fastMs
+            d >= BIG -> fastMs
+            d <= SMALL -> slowMs
+            else -> slowMs + ((d - SMALL) / (BIG - SMALL) * (fastMs - slowMs)).toLong()
         }
         start(zone, cur, target, now, ms)
     }
@@ -141,13 +151,15 @@ class ColourEngine(private val zones: Int) {
                 ratio > 1f && luma(last) < 16f -> meanColour // was dark, so no hue of its own
                 else -> scale(last, ratio)
             }
-            start(z, currentOf(z, now), rgb(predicted), now, FAST_MS)
+            start(z, currentOf(z, now), rgb(predicted), now, fastMs)
         }
     }
 
     companion object {
         const val FAST_MS = 20L
         const val SLOW_MS = 200L
+        const val SMOOTH_FAST_MS = 60L
+        const val SMOOTH_SLOW_MS = 300L
         /** Per-channel difference (0..255) from which a change counts as big... */
         const val BIG = 24f
         /** ...and up to which it counts as noise. */

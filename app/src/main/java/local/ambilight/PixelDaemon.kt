@@ -1,7 +1,5 @@
 package local.ambilight
 
-import android.os.IBinder
-import android.os.Parcel
 import java.util.Locale
 
 /**
@@ -24,18 +22,12 @@ import java.util.Locale
  *   E <text>              a problem the service should show
  */
 object PixelDaemon {
-    private const val DESC = "vendor.mediatek.hardware.render.IRender"
-    private const val TX_CLOSE_CONTROLLER = 5
-    private const val TX_GET_PIXEL_INFO = 49
-    private const val TX_OPEN_CONTROLLER = 69
-
     /** Below this luma a sample counts as black when looking for letterbox bars. */
     private const val DARK = 24
     /** How often the black-bar probes run; they take one read per round, so they never stall the stream. */
     private const val BAR_CHECK_MS = 20_000L
     private const val HEX = "0123456789abcdef"
 
-    private lateinit var hal: IBinder
     private var controller = 0
     private var frameMs = 21L
 
@@ -47,21 +39,18 @@ object PixelDaemon {
         val segments = args[3].toInt()
         frameMs = args[4].toLong()
 
-        val service = Class.forName("android.os.ServiceManager").getMethod("getService", String::class.java)
-            .invoke(null, "$DESC/default") as IBinder?
-        if (service == null) {
+        if (!RenderHal.connect()) {
             emit("E render HAL not found")
             return
         }
-        hal = service
         // Wake on time after each one-frame sleep (init allows every process nice down to -20).
         runCatching { android.os.Process.setThreadPriority(-10) }
-        controller = openController()
-        Runtime.getRuntime().addShutdownHook(Thread { runCatching { closeController() } })
+        controller = RenderHal.openController()
+        Runtime.getRuntime().addShutdownHook(Thread { runCatching { RenderHal.closeController(controller) } })
         try {
             loop(w, h, sides, segments)
         } finally {
-            runCatching { closeController() }
+            runCatching { RenderHal.closeController(controller) }
         }
     }
 
@@ -132,9 +121,9 @@ object PixelDaemon {
 
     /** The pixel at one point: ask, wait one displayed frame, ask again and keep the second answer. */
     private fun read(x: Int, y: Int): Int? {
-        pixel(x, y)
+        RenderHal.pixel(controller, x, y)
         Thread.sleep(frameMs)
-        return pixel(x, y)
+        return RenderHal.pixel(controller, x, y)
     }
 
     private data class Point(val x: Int, val y: Int)
@@ -195,65 +184,5 @@ object PixelDaemon {
     private fun emit(line: String) {
         System.out.println(line)
         System.out.flush()
-    }
-
-    private fun call(code: Int, write: (Parcel) -> Unit): Parcel {
-        val data = Parcel.obtain(hal)
-        val reply = Parcel.obtain()
-        try {
-            data.writeInterfaceToken(DESC)
-            write(data)
-            hal.transact(code, data, reply, 0)
-        } finally {
-            data.recycle()
-        }
-        reply.readException()
-        return reply
-    }
-
-    private fun openController(): Int {
-        val r = call(TX_OPEN_CONTROLLER) {
-            it.writeInt(1) // non-null ST_OPEN_CONTROLLER_PARAMS
-            it.writeInt(4) // its size: it has no fields
-        }
-        r.readInt() // non-null RetOpenController
-        r.readInt() // size
-        val eRet = r.readInt()
-        val c = r.readInt()
-        r.recycle()
-        check(eRet == 0) { "OpenController failed: $eRet" }
-        return c
-    }
-
-    private fun closeController() {
-        call(TX_CLOSE_CONTROLLER) { it.writeInt(controller) }.recycle()
-    }
-
-    /** The HAL's answer as 0xRRGGBB (see the class comment for which position it belongs to), or null. */
-    private fun pixel(x: Int, y: Int): Int? {
-        val r = call(TX_GET_PIXEL_INFO) {
-            it.writeInt(controller)
-            it.writeInt(1)  // non-null ST_PIXEL_POSITION
-            it.writeInt(12) // size: size field + x + y
-            it.writeInt(x)
-            it.writeInt(y)
-        }
-        try {
-            r.readInt() // non-null RetGetPixelInfo
-            r.readInt() // size
-            if (r.readInt() != 0) return null // eRet
-            r.readInt() // non-null ST_PIXEL_INFO
-            r.readInt() // size
-            r.readInt() // non-null position
-            r.readInt() // position size
-            r.readInt() // x
-            r.readInt() // y
-            val red = r.readInt() and 0xffff
-            val green = r.readInt() and 0xffff
-            val blue = r.readInt() and 0xffff
-            return (red.coerceAtMost(255) shl 16) or (green.coerceAtMost(255) shl 8) or blue.coerceAtMost(255)
-        } finally {
-            r.recycle()
-        }
     }
 }

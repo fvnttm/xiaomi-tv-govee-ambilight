@@ -3,23 +3,24 @@ package local.ambilight
 import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -28,270 +29,290 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.drawscope.DrawScope
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.drawText
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.ClickableSurfaceDefaults
+import androidx.tv.material3.LocalContentColor
 import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
-import kotlinx.coroutines.delay
-
-private val Background = Color(0xFF0E0F12)
-private val Panel = Color(0xFF17191E)
-private val PanelFocused = Color(0xFFE9EAEE)
-private val TextPrimary = Color(0xFFE9EAEE)
-private val TextMuted = Color(0xFF8B8F98)
-private val Warning = Color(0xFFF2A65A)
-private val ScreenColour = Color(0xFF1B1D22)
-/** An unlit segment, so the strip's shape shows even when the picture is black. */
-private val SlotColour = Color(0xFF2A2D34)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         startForegroundService(Intent(this, AmbilightService::class.java))
         val config = Config(this)
-        // For tests over ADB: am start -n local.ambilight/.MainActivity --es open picture|latency
+        // For tests over ADB: am start -n local.ambilight/.MainActivity --es open picture|latency|wled
         val open = intent.getStringExtra("open")
         setContent {
-            Screen(config, open) {
+            App(config, open) {
                 startService(Intent(this, AmbilightService::class.java).setAction(AmbilightService.ACTION_TEST))
             }
         }
     }
 }
 
+/** The settings screen, or one of the full-screen pages opened from it. Back on a page returns to the row that opened it. */
 @Composable
-private fun Screen(config: Config, open: String?, onTest: () -> Unit) {
+private fun App(config: Config, open: String?, onSegmentTest: () -> Unit) {
+    var settings by remember { mutableStateOf(config.read()) }
+    var page by remember { mutableStateOf(open) }
+    var focusKey by remember { mutableStateOf("enabled") }
+    fun change(new: Settings) {
+        settings = new
+        config.write(new)
+    }
+    when (page) {
+        "picture" -> TestPicture { page = null }
+        "latency" -> LatencyTest { page = null }
+        "wled" -> WledScreen(settings, onPick = { device ->
+            change(settings.copy(
+                espIp = device.ip,
+                espName = device.name,
+                ledCount = if (device.leds in 1..Config.MAX_LEDS) device.leds else settings.ledCount,
+            ))
+        }) { page = null }
+        else -> SettingsScreen(settings, ::change, focusKey, onSegmentTest) { key ->
+            focusKey = key
+            page = key
+        }
+    }
+}
+
+@Composable
+private fun SettingsScreen(
+    s: Settings,
+    change: (Settings) -> Unit,
+    focusKey: String,
+    onSegmentTest: () -> Unit,
+    onOpen: (String) -> Unit,
+) {
     val status by Status.state.collectAsState()
-    var enabled by remember { mutableStateOf(config.enabled) }
-    var reverse by remember { mutableStateOf(config.reverse) }
-    var sides by remember { mutableIntStateOf(config.sides) }
-    var filterSubtitles by remember { mutableStateOf(config.filterSubtitles) }
-    var offset by remember { mutableIntStateOf(config.offset) }
-    var showPicture by remember { mutableStateOf(open == "picture") }
-    var showLatency by remember { mutableStateOf(open == "latency") }
-    val first = remember { FocusRequester() }
-    if (showPicture) {
-        TestPicture { showPicture = false }
-        return
-    }
-    if (showLatency) {
-        LatencyTest { showLatency = false }
-        return
-    }
-    LaunchedEffect(Unit) { first.requestFocus() }
+    var hint by remember { mutableStateOf("") }
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focus.requestFocus() }
+    /** The row to focus when the screen appears: the first one, or the one a page was opened from. */
+    fun Modifier.initial(key: String) = if (key == focusKey) focusRequester(focus) else this
 
     Row(
         Modifier
             .fillMaxSize()
             .background(Background)
-            .padding(horizontal = 64.dp, vertical = 48.dp),
-        horizontalArrangement = Arrangement.spacedBy(56.dp),
+            .padding(horizontal = 56.dp),
+        horizontalArrangement = Arrangement.spacedBy(48.dp),
     ) {
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Ambilight", color = TextPrimary, fontSize = 30.sp, fontWeight = FontWeight.Medium)
-            Spacer(Modifier.height(4.dp))
-            TvPreview(status.segments, sides)
-            Spacer(Modifier.height(12.dp))
-            StatusLine("Tryb", status.mode)
-            StatusLine("Obraz", status.picture)
-            StatusLine("Taśma", status.strip)
-            StatusLine("ADB", status.adb)
-            if (status.problem.isNotEmpty()) Text(status.problem, color = Warning, fontSize = 15.sp)
+        Column(Modifier.weight(1f).fillMaxHeight().padding(vertical = 40.dp)) {
+            Text("Ambilight", color = TextPrimary, fontSize = 28.sp, fontWeight = FontWeight.Medium)
+            Spacer(Modifier.height(16.dp))
+            TvPreview(status.segments, s.sides, Modifier.height(204.dp).aspectRatio(1.62f))
+            Spacer(Modifier.height(16.dp))
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                StatusLine("Tryb", status.mode)
+                StatusLine("Obraz", status.picture)
+                StatusLine("Taśma", status.strip)
+                StatusLine("ADB", status.adb)
+            }
+            if (status.problem.isNotEmpty()) {
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    status.problem,
+                    Modifier.background(Warning.copy(alpha = 0.14f), RoundedCornerShape(6.dp)).padding(horizontal = 12.dp, vertical = 8.dp),
+                    color = Warning,
+                    fontSize = 14.sp,
+                    lineHeight = 19.sp,
+                )
+            }
+            Spacer(Modifier.weight(1f))
+            Text(hint, color = TextMuted, fontSize = 14.sp, lineHeight = 20.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
         }
-        Column(Modifier.width(380.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Setting("Ambilight", if (enabled) "włączony" else "wyłączony", Modifier.focusRequester(first)) {
-                enabled = !enabled
-                config.enabled = enabled
-            }
-            Setting("Kierunek taśmy", if (reverse) "odwrócony" else "zwykły") {
-                reverse = !reverse
-                config.reverse = reverse
-            }
-            Setting("Układ", if (sides == 4) "4 boki" else "3 boki") {
-                sides = if (sides == 4) 3 else 4
-                config.sides = sides
-            }
-            Setting("Filtr napisów", if (filterSubtitles) "włączony" else "wyłączony") {
-                filterSubtitles = !filterSubtitles
-                config.filterSubtitles = filterSubtitles
-            }
-            Setting("Przesunięcie (+1 dioda)", "$offset diod") {
-                offset = (offset + 1) % config.ledCount
-                config.offset = offset
-            }
-            Setting("Przesunięcie (-1 dioda)", "cofnij") {
-                offset = (offset - 1 + config.ledCount) % config.ledCount
-                config.offset = offset
-            }
-            Setting("Test segmentów", "60 s", onClick = onTest)
-            Setting("Obraz testowy", "pokaż") { showPicture = true }
-            Setting("Test opóźnienia", "30 s") { showLatency = true }
-            Text(
-                "Test segmentów zapala strefę 1 na czerwono, 2 na żółto (kierunek), 8 na zielono i 14 na fioletowo. " +
-                    "Ustaw kierunek i przesunięcie tak, żeby kolory wypadły przy liczbach na podglądzie. " +
-                    "Obraz testowy ma krawędzie: lewa czerwona, góra zielona, prawa niebieska, dół żółty.",
-                color = TextMuted,
-                fontSize = 13.sp,
-                lineHeight = 18.sp,
+
+        Column(
+            Modifier.width(400.dp).fillMaxHeight().verticalScroll(rememberScrollState()).padding(vertical = 40.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            val onHint = { text: String -> hint = text }
+            SettingRow(
+                "Ambilight", hint = "Włącza i wyłącza podświetlenie. Po wyłączeniu taśma gaśnie.", onHint = onHint,
+                modifier = Modifier.initial("enabled"), checked = s.enabled,
+            ) { change(s.copy(enabled = !s.enabled)) }
+
+            Section("Taśma")
+            SettingRow(
+                "Sterownik WLED", s.espName.ifEmpty { s.espIp },
+                "Wybierz sterownik WLED znaleziony w sieci albo wpisz jego adres. Liczba diod ustawi się sama.",
+                onHint, Modifier.initial("wled"),
+            ) { onOpen("wled") }
+            SettingRow(
+                "Liczba diod", "${s.ledCount}",
+                "Lewo i prawo zmieniają liczbę diod na taśmie. Przytrzymaj, żeby zmieniać szybciej.", onHint,
+                onStep = { d -> change(s.copy(ledCount = (s.ledCount + d).coerceIn(1, Config.MAX_LEDS))) },
             )
+            SettingRow(
+                "Kierunek", if (s.reverse) "odwrócony" else "zwykły",
+                "Odwróć, jeśli kolory biegną wokół ekranu w przeciwną stronę niż obraz.", onHint,
+            ) { change(s.copy(reverse = !s.reverse)) }
+            SettingRow(
+                "Układ", if (s.sides == 4) "4 boki" else "3 boki",
+                "4 boki: taśma dookoła ekranu. 3 boki: lewy, górny i prawy, bez dolnej krawędzi.", onHint,
+            ) { change(s.copy(sides = if (s.sides == 4) 3 else 4)) }
+            SettingRow(
+                "Przesunięcie", "${s.offset}",
+                "Lewo i prawo przesuwają początek taśmy o jedną diodę. Włącz test segmentów i ustaw tak, żeby " +
+                    "kolory wypadły przy liczbach 1, 8 i 14 na podglądzie.",
+                onHint,
+                onStep = { d -> change(s.copy(offset = (s.offset + d).mod(s.ledCount))) },
+            )
+
+            Section("Obraz")
+            SettingRow(
+                "Jasność", "${s.brightness}%", "Lewo i prawo zmieniają jasność taśmy.", onHint,
+                onStep = { d -> change(s.copy(brightness = (s.brightness + 10 * d).coerceIn(10, 100))) },
+            )
+            SettingRow(
+                "Reakcja", if (s.smooth) "płynna" else "szybka",
+                "Szybka: taśma zmienia kolor niemal razem z obrazem. Płynna: łagodniejsze przejścia, " +
+                    "o około 40 ms wolniejsze.",
+                onHint,
+            ) { change(s.copy(smooth = !s.smooth)) }
+            SettingRow(
+                "Filtr napisów",
+                hint = "Białe i żółte napisy nie rozświetlają środka dolnej krawędzi. Działa przy 4 bokach.",
+                onHint = onHint, checked = s.filterSubtitles,
+            ) { change(s.copy(filterSubtitles = !s.filterSubtitles)) }
+
+            Section("Testy")
+            SettingRow(
+                "Test segmentów", if (status.testing) "zakończ" else "60 s",
+                "Zapala strefę 1 na czerwono, 2 na żółto (pokazuje kierunek), 8 na zielono i 14 na fioletowo. " +
+                    "Ustaw kierunek i przesunięcie tak, żeby kolory wypadły przy liczbach na podglądzie.",
+                onHint, onClick = onSegmentTest,
+            )
+            SettingRow(
+                "Obraz testowy", "pokaż",
+                "Pełny ekran z kolorowymi krawędziami: lewa czerwona, górna zielona, prawa niebieska, dolna żółta. " +
+                    "Taśma powinna pokazać te same kolory po tych samych stronach.",
+                onHint, Modifier.initial("picture"),
+            ) { onOpen("picture") }
+            SettingRow(
+                "Test opóźnienia", "30 s",
+                "Ekran miga czernią i bielą przez 30 s, a aplikacja mierzy czas od zmiany obrazu do koloru " +
+                    "wysłanego na taśmę.",
+                onHint, Modifier.initial("latency"),
+            ) { onOpen("latency") }
         }
     }
 }
 
-/**
- * The picture zones the strip follows, in the order the colours are read: up the left, across the top, down the
- * right (and along the bottom with 4 sides). Labels 1, 8 and 14 mark the zones the segment test lights; the test
- * goes through the strip's direction and offset, so with the right settings its colours appear at these labels.
- */
 @Composable
-private fun TvPreview(edges: List<Int>, sides: Int) {
-    val measurer = rememberTextMeasurer()
-    // Inner screen about 16:9 with four sides (238 x 132 dp).
-    Canvas(Modifier.size(width = 300.dp, height = 194.dp)) {
-        val margin = 16.dp.toPx()
-        val band = 10.dp.toPx()
-        val gap = 5.dp.toPx()
-        val ring = margin + band + gap
-        val origin = Offset(ring, ring)
-        val screen = Size(size.width - 2 * ring, size.height - ring - if (sides == 4) ring else gap)
-        drawRect(ScreenColour, origin, screen)
-        val n = edges.size
-        val path = if (sides == 4) 2 * screen.height + 2 * screen.width else 2 * screen.height + screen.width
-        for (i in 0 until n) {
-            val from = path * i / n
-            val to = path * (i + 1) / n
-            drawEdgeSpan(from, to, screen, origin, band, gap, SlotColour)
-            val c = edges[i]
-            val lit = maxOf(c shr 16 and 0xff, c shr 8 and 0xff, c and 0xff) > 0x38
-            if (lit) drawEdgeSpan(from, to, screen, origin, band, gap, Color(0xFF000000.toInt() or c))
-        }
-        for (zone in listOf(0, 7, n - 1)) {
-            val at = labelPoint(path * (zone + 0.5f) / n, screen, origin, ring - margin / 2)
-            val text = measurer.measure("${zone + 1}", TextStyle(color = TextMuted, fontSize = 11.sp))
-            drawText(text, topLeft = at - Offset(text.size.width / 2f, text.size.height / 2f))
-        }
-    }
-}
-
-/** A point [distance] outside the screen edge, [t] along the edge path. */
-private fun labelPoint(t: Float, screen: Size, o: Offset, distance: Float): Offset {
-    val h = screen.height
-    val w = screen.width
-    return when {
-        t < h -> Offset(o.x - distance, o.y + h - t)
-        t < h + w -> Offset(o.x + (t - h), o.y - distance)
-        t < 2 * h + w -> Offset(o.x + w + distance, o.y + (t - h - w))
-        else -> Offset(o.x + w - (t - 2 * h - w), o.y + h + distance)
-    }
-}
-
-private fun DrawScope.drawEdgeSpan(from: Float, to: Float, screen: Size, o: Offset, band: Float, gap: Float, colour: Color) {
-    val h = screen.height
-    val w = screen.width
-    // Split the span where it turns a corner, then draw each straight piece.
-    val corners = listOf(0f, h, h + w, 2 * h + w, 2 * h + 2 * w)
-    for (k in 0 until 4) {
-        val a = maxOf(from, corners[k])
-        val b = minOf(to, corners[k + 1])
-        if (a >= b) continue
-        val pad = 1.5f
-        when (k) {
-            0 -> drawRect(colour, Offset(o.x - gap - band, o.y + h - (b - corners[0]) + pad), Size(band, b - a - 2 * pad))
-            1 -> drawRect(colour, Offset(o.x + (a - corners[1]) + pad, o.y - gap - band), Size(b - a - 2 * pad, band))
-            2 -> drawRect(colour, Offset(o.x + w + gap, o.y + (a - corners[2]) + pad), Size(band, b - a - 2 * pad))
-            3 -> drawRect(colour, Offset(o.x + w - (b - corners[3]) + pad, o.y + h + gap), Size(b - a - 2 * pad, band))
-        }
-    }
-}
-
-/** Known colours on each edge, so the whole chain (picture -> strip) can be checked by eye. Back closes it. */
-@Composable
-private fun TestPicture(onExit: () -> Unit) {
-    BackHandler(onBack = onExit)
-    Box(Modifier.fillMaxSize().background(Color(0xFF303236))) {
-        Box(Modifier.fillMaxHeight().fillMaxWidth(0.12f).align(Alignment.CenterStart).background(Color(0xFFFF0000)))
-        Box(Modifier.fillMaxHeight().fillMaxWidth(0.12f).align(Alignment.CenterEnd).background(Color(0xFF0000FF)))
-        Box(Modifier.fillMaxWidth().fillMaxHeight(0.15f).align(Alignment.TopCenter).background(Color(0xFF00FF00)))
-        Box(Modifier.fillMaxWidth().fillMaxHeight(0.15f).align(Alignment.BottomCenter).background(Color(0xFFFFD000)))
-        Text("Obraz testowy · Wstecz zamyka", Modifier.align(Alignment.Center), color = TextPrimary, fontSize = 18.sp)
-    }
-}
-
-/**
- * Full screen flipping between black and white every 1.5 s for 30 s; LatencyProbe measures how long the reading
- * and the strip take to follow. The results stay on screen until Back.
- */
-@Composable
-private fun LatencyTest(onExit: () -> Unit) {
-    BackHandler(onBack = onExit)
-    val result by LatencyProbe.result.collectAsState()
-    var white by remember { mutableStateOf(false) }
-    var done by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        LatencyProbe.start()
-        delay(1_500) // settle on black first; this state is not measured
-        repeat(20) {
-            white = !white
-            // Taken at the start of the frame that draws the new colour.
-            withFrameNanos { LatencyProbe.flip(white) }
-            delay(1_500)
-        }
-        LatencyProbe.stop()
-        done = true
-    }
-    Box(Modifier.fillMaxSize().background(if (white && !done) Color.White else Color.Black)) {
-        val text = if (done) result.describe() + "\n\nWstecz zamyka" else "Test opóźnienia · ${result.flips}/20"
-        Text(
-            text,
-            Modifier.align(Alignment.Center).background(Color(0xFF303236), RoundedCornerShape(8.dp)).padding(16.dp),
-            color = TextPrimary,
-            fontSize = if (done) 18.sp else 12.sp,
-        )
-    }
+private fun Section(title: String) {
+    Text(
+        title.uppercase(),
+        Modifier.padding(start = 16.dp, top = 14.dp, bottom = 2.dp),
+        color = TextMuted,
+        fontSize = 12.sp,
+        fontWeight = FontWeight.Medium,
+        letterSpacing = 1.2.sp,
+    )
 }
 
 @Composable
 private fun StatusLine(label: String, value: String) {
     Row(verticalAlignment = Alignment.Top) {
-        Text(label, color = TextMuted, fontSize = 15.sp, modifier = Modifier.width(72.dp))
-        Text(value, color = TextPrimary, fontSize = 15.sp)
+        Text(label, color = TextMuted, fontSize = 14.sp, lineHeight = 19.sp, modifier = Modifier.width(64.dp))
+        Text(value, color = TextPrimary, fontSize = 14.sp, lineHeight = 19.sp)
     }
 }
 
+/**
+ * One setting. With [checked] it is a switch; with [onStep] the left and right keys change the value (and OK
+ * steps up); otherwise OK runs [onClick] and [value] says what it will do or what is set.
+ */
 @Composable
-private fun Setting(label: String, value: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+private fun SettingRow(
+    label: String,
+    value: String = "",
+    hint: String,
+    onHint: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    checked: Boolean? = null,
+    onStep: ((Int) -> Unit)? = null,
+    onClick: () -> Unit = { onStep?.invoke(1) },
+) {
+    var focused by remember { mutableStateOf(false) }
     Surface(
         onClick = onClick,
-        modifier = modifier.fillMaxWidth(),
-        shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(10.dp)),
+        modifier = modifier
+            .fillMaxWidth()
+            .onFocusChanged {
+                focused = it.isFocused
+                if (it.isFocused) onHint(hint)
+            }
+            .onPreviewKeyEvent { e ->
+                if (onStep == null || e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                when (e.key) {
+                    Key.DirectionLeft -> { onStep(-1); true }
+                    Key.DirectionRight -> { onStep(1); true }
+                    else -> false
+                }
+            },
+        shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(8.dp)),
         colors = ClickableSurfaceDefaults.colors(
             containerColor = Panel,
             contentColor = TextPrimary,
             focusedContainerColor = PanelFocused,
             focusedContentColor = Background,
+            pressedContainerColor = PanelFocused,
+            pressedContentColor = Background,
         ),
         scale = ClickableSurfaceDefaults.scale(focusedScale = 1.02f),
     ) {
         Row(
-            Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
+            Modifier.padding(horizontal = 16.dp).height(44.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(label, fontSize = 16.sp, modifier = Modifier.weight(1f))
-            Text(value, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+            Text(label, fontSize = 15.sp, modifier = Modifier.weight(1f))
+            when {
+                checked != null -> Switch(checked)
+                onStep != null -> {
+                    val arrow = LocalContentColor.current.copy(alpha = if (focused) 0.7f else 0.25f)
+                    Text("‹", color = arrow, fontSize = 18.sp)
+                    Text(
+                        value,
+                        Modifier.padding(horizontal = 12.dp),
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                    Text("›", color = arrow, fontSize = 18.sp)
+                }
+                else -> Text(value, fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
         }
+    }
+}
+
+@Composable
+private fun Switch(on: Boolean) {
+    val content = LocalContentColor.current
+    Canvas(Modifier.size(width = 36.dp, height = 20.dp)) {
+        val r = size.height / 2
+        drawRoundRect(if (on) Accent else content.copy(alpha = 0.25f), cornerRadius = CornerRadius(r, r))
+        drawCircle(
+            if (on) Background else content.copy(alpha = 0.8f),
+            radius = r - 3.dp.toPx(),
+            center = Offset(if (on) size.width - r else r, r),
+        )
     }
 }

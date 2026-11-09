@@ -32,7 +32,14 @@ const val SEGMENTS = 14
 class AmbilightService : Service() {
     private lateinit var config: Config
     private lateinit var adb: AdbBridge
-    private lateinit var ddp: Ddp
+    @Volatile private lateinit var settings: Settings
+
+    private val ddp = Ddp { ip, reachable ->
+        val s = settings
+        if (ip == s.espIp) Status.set {
+            it.copy(strip = if (reachable) "${s.espName.ifEmpty { "WLED" }} · $ip · ${s.ledCount} diod" else "WLED nie odpowiada pod $ip")
+        }
+    }
 
     @Volatile private var alive = true
     @Volatile private var screenOn = true
@@ -40,8 +47,8 @@ class AmbilightService : Service() {
     @Volatile private var testUntil = 0L
     private val wake = java.lang.Object()
 
-    private var lastPreview = 0L
     private var lastFrameLog = 0L
+    private var lastSubtitleLog = 0L
 
     /** Zone colours over time; fed by the session thread, read by the render thread. */
     private val engine = ColourEngine(SEGMENTS)
@@ -50,7 +57,7 @@ class AmbilightService : Service() {
     /** Black frame and WLED off, so the strip doesn't fall back to its own preset when the stream stops. */
     private fun blackout() {
         engine.reset()
-        ddp.sendBlack()
+        ddp.sendBlack(settings.ledCount)
         ddp.setOff()
     }
 
@@ -74,8 +81,16 @@ class AmbilightService : Service() {
         }
     }
 
-    private val prefsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-        if (key == "enabled" || key == "sides") restartSession()
+    private val prefsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
+        val old = settings
+        val new = config.read()
+        settings = new
+        engine.setSmooth(new.smooth)
+        if (new.espIp != old.espIp) {
+            ddp.ip = new.espIp
+            if (session != null) ddp.setOn()
+        }
+        if (new.enabled != old.enabled || new.sides != old.sides) restartSession()
     }
 
     override fun onBind(intent: Intent?) = null
@@ -84,7 +99,9 @@ class AmbilightService : Service() {
         super.onCreate()
         config = Config(this)
         adb = AdbBridge(this)
-        ddp = Ddp(config)
+        settings = config.read()
+        engine.setSmooth(settings.smooth)
+        ddp.ip = settings.espIp
         startForeground(1, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
         screenOn = getSystemService(PowerManager::class.java).isInteractive
         registerReceiver(screenReceiver, IntentFilter().apply {
@@ -98,7 +115,8 @@ class AmbilightService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_TEST) {
-            testUntil = SystemClock.elapsedRealtime() + 60_000
+            // Starts the segment test, or ends one that is running.
+            testUntil = if (testing()) 0 else SystemClock.elapsedRealtime() + 60_000
             // A running session shows the test from onFrame; otherwise wake the supervisor to show it.
             synchronized(wake) { wake.notifyAll() }
         }
@@ -113,7 +131,7 @@ class AmbilightService : Service() {
         restartSession()
         // Network calls are not allowed on the main thread.
         thread(name = "shutdown") {
-            ddp.sendBlack()
+            ddp.sendBlack(settings.ledCount)
             ddp.setOff()
             ddp.close()
         }
@@ -126,10 +144,10 @@ class AmbilightService : Service() {
         var backoff = 2_000L
         while (alive) {
             when {
-                !config.enabled -> {
+                !settings.enabled -> {
                     blackout()
                     Status.set { it.copy(mode = "wyłączony") }
-                    while (alive && !config.enabled) {
+                    while (alive && !settings.enabled) {
                         idle(60_000)
                     }
                     continue
@@ -152,27 +170,28 @@ class AmbilightService : Service() {
             }
             session = null
             if (!alive) break
-            if (config.enabled && screenOn) {
+            if (settings.enabled && screenOn) {
                 // Wait before reconnecting. The test pattern is resent every second, because WLED leaves
                 // realtime mode a few seconds after the last packet.
                 val retryAt = SystemClock.elapsedRealtime() + backoff
                 var dark = false
                 var testShown = false
-                while (alive && config.enabled && screenOn) {
+                while (alive && settings.enabled && screenOn) {
                     val left = retryAt - SystemClock.elapsedRealtime()
                     if (left <= 0) break
                     if (testing()) {
                         if (!testShown) ddp.setOn()
-                        ddp.sendTest(config.reverse, config.offset)
-                        Status.set { it.copy(mode = "test segmentów") }
+                        val s = settings
+                        ddp.sendTest(s.ledCount, s.reverse, s.offset)
+                        Status.set { it.copy(mode = "test segmentów", testing = true) }
                         testShown = true
                         dark = false
-                        idle(minOf(left, 1_000))
+                        idle(minOf(left, 200))
                     } else {
                         if (!dark) blackout()
                         dark = true
                         testShown = false
-                        Status.set { it.copy(mode = "brak odczytu obrazu: taśma wyłączona") }
+                        Status.set { it.copy(mode = "brak odczytu obrazu, taśma wyłączona", testing = false) }
                         idle(left)
                     }
                 }
@@ -183,11 +202,19 @@ class AmbilightService : Service() {
 
     /** Runs until the daemon stream ends or is closed (standby, settings change). */
     private fun runSession() {
-        Status.set { it.copy(adb = "łączenie… (jeśli TV zapyta o debugowanie: „Zawsze zezwalaj” i OK)") }
+        Status.set { it.copy(adb = "łączenie… Gdy TV zapyta o debugowanie: „Zawsze zezwalaj” i OK") }
         val connection = adb.connect()
         session = connection
         connection.use { d ->
-            d.shell("true") // the handshake; the first time this waits for the TV's authorisation dialog
+            // The handshake; the first time this waits for the TV's authorisation dialog. If the dialog is
+            // dismissed or times out, adbd never answers: give up after a while, so the retry asks again.
+            var authorised = false
+            thread(name = "adb-auth-timeout", isDaemon = true) {
+                Thread.sleep(AUTH_TIMEOUT_MS)
+                if (!authorised) runCatching { d.close() }
+            }
+            d.shell("true")
+            authorised = true
             Status.set { it.copy(adb = "połączono", problem = "") }
             adb.grantPermissions(d)
             ddp.setOn()
@@ -197,13 +224,13 @@ class AmbilightService : Service() {
             // before the next vsync returns the previous point (measured; without the margin colours flicker).
             // The session restarts when the refresh rate changes.
             val frameMs = kotlin.math.ceil(1000.0 / display.refreshRate).toInt() + 2
-            d.open(adb.daemonCommand(mode.physicalWidth, mode.physicalHeight, config.sides, frameMs)).use { stream ->
+            d.open(adb.daemonCommand(mode.physicalWidth, mode.physicalHeight, settings.sides, frameMs)).use { stream ->
                 Status.set { it.copy(picture = "uruchamianie odczytu…") }
                 engine.reset()
                 rendering = true
                 val renderer = thread(name = "render") { render() }
                 try {
-                    while (alive && screenOn && config.enabled) {
+                    while (alive && screenOn && settings.enabled) {
                         val line = stream.source.readUtf8Line() ?: break
                         when {
                             line.startsWith("F ") -> onFrame(line)
@@ -214,6 +241,7 @@ class AmbilightService : Service() {
                 } finally {
                     rendering = false
                     renderer.join(500)
+                    Status.set { it.copy(testing = false) }
                 }
             }
         }
@@ -227,10 +255,14 @@ class AmbilightService : Service() {
         val raw = IntArray(SEGMENTS) { p -> parts[p + 2].toInt(16) }
         LatencyProbe.onRead(raw)
         if (zone !in 0 until SEGMENTS) return
-        if (config.filterSubtitles && config.sides == 4) filterSubtitles(raw)
-        engine.onReading(zone, enhance(raw[zone]), SystemClock.elapsedRealtime())
-
         val now = SystemClock.elapsedRealtime()
+        val s = settings
+        if (s.filterSubtitles && s.sides == 4 && Picture.filterSubtitles(raw) && now - lastSubtitleLog > 5_000) {
+            lastSubtitleLog = now
+            Log.d(TAG, "subtitles suppressed")
+        }
+        engine.onReading(zone, Picture.enhance(raw[zone]), now)
+
         if (now - lastFrameLog > 10_000) {
             lastFrameLog = now
             Log.d(TAG, "frame in=${line.substring(2)}")
@@ -240,145 +272,47 @@ class AmbilightService : Service() {
     /**
      * Sends the strip a frame every 1/120 s while a session runs: zone colours at this moment, interpolated for
      * every LED, through the LED curve. Runs on its own clock, so transitions keep an even pace whatever the
-     * rhythm of the readings.
+     * rhythm of the readings. Ddp drops frames that repeat the last one.
      */
     private fun render() {
         runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY) }
         val zoneColours = Array(SEGMENTS) { FloatArray(3) }
+        var leds = IntArray(0)
+        var lastPreview = 0L
         var next = System.nanoTime()
         while (rendering) {
             val now = SystemClock.elapsedRealtime()
-            if (testing()) {
-                ddp.sendTest(config.reverse, config.offset)
+            val s = settings
+            val testing = testing()
+            if (testing) {
+                ddp.sendTest(s.ledCount, s.reverse, s.offset)
             } else {
+                if (leds.size != s.ledCount) leds = IntArray(s.ledCount)
                 engine.current(now, zoneColours)
-                ddp.sendFrame(leds(zoneColours))
+                Picture.leds(zoneColours, leds, s.reverse, s.offset.mod(s.ledCount), s.brightness)
+                ddp.sendFrame(leds)
                 LatencyProbe.onOutput(
                     zoneColours.sumOf { maxOf(it[0], it[1], it[2]).toDouble() }.toFloat() / SEGMENTS / 255f,
                 )
             }
-            if (now - lastPreview > 200) {
+            if (now - lastPreview > PREVIEW_MS) {
                 lastPreview = now
-                val edges = zoneColours.map { c ->
-                    (Math.round(c[0]) shl 16) or (Math.round(c[1]) shl 8) or Math.round(c[2])
+                val mode = if (testing) "test segmentów" else "ambilight"
+                val old = Status.state.value
+                // The preview colours matter only while the screen is open.
+                if (Status.state.subscriptionCount.value > 0) {
+                    val edges = zoneColours.map { c ->
+                        (Math.round(c[0]) shl 16) or (Math.round(c[1]) shl 8) or Math.round(c[2])
+                    }
+                    Status.set { it.copy(segments = edges, mode = mode, testing = testing) }
+                } else if (old.mode != mode || old.testing != testing) {
+                    Status.set { it.copy(mode = mode, testing = testing) }
                 }
-                Status.set { it.copy(segments = edges, mode = if (testing()) "test segmentów" else "ambilight") }
             }
             next += FRAME_NS
             val wait = next - System.nanoTime()
             if (wait > 0) java.util.concurrent.locks.LockSupport.parkNanos(wait) else next = System.nanoTime()
         }
-    }
-
-    /** Smooth (Hermite) interpolation between the two nearest zones for every LED, then the LED curve. */
-    private fun leds(zoneColours: Array<FloatArray>): IntArray {
-        val n = config.ledCount
-        val reverse = config.reverse
-        val offset = config.offset.mod(n)
-        val out = IntArray(n)
-        for (i in 0 until n) {
-            val u = ((i + 0.5f) / n * SEGMENTS - 0.5f).mod(SEGMENTS.toFloat())
-            val i0 = u.toInt().mod(SEGMENTS)
-            val i1 = (i0 + 1) % SEGMENTS
-            val f = u - u.toInt()
-            val t = f * f * (3f - 2f * f)
-            fun ch(c: Int) = ColourEngine.OUTPUT[
-                Math.round(zoneColours[i0][c] * (1f - t) + zoneColours[i1][c] * t).coerceIn(0, 255)
-            ]
-            out[((if (reverse) n - 1 - i else i) + offset).mod(n)] = (ch(0) shl 16) or (ch(1) shl 8) or ch(2)
-        }
-        return out
-    }
-
-    private fun blend2(c1: Int, c2: Int, w1: Float): Int {
-        val w2 = 1.0f - w1
-        val r = (((c1 shr 16 and 0xff) * w1) + ((c2 shr 16 and 0xff) * w2)).toInt().coerceIn(0, 255)
-        val g = (((c1 shr 8 and 0xff) * w1) + ((c2 shr 8 and 0xff) * w2)).toInt().coerceIn(0, 255)
-        val b = (((c1 and 0xff) * w1) + ((c2 and 0xff) * w2)).toInt().coerceIn(0, 255)
-        return (r shl 16) or (g shl 8) or b
-    }
-
-    private var lastSubLog = 0L
-
-    /**
-     * Detects when movie/series subtitles light up bottom-center segments (11 and 12)
-     * and replaces them with an interpolation of the surrounding bottom background (10 and 13).
-     */
-    private fun filterSubtitles(raw: IntArray) {
-        if (raw.size != 14) return
-
-        // Top segments: 3, 4, 5, 6
-        val topLuma = (lumaOf(raw[3]) + lumaOf(raw[4]) + lumaOf(raw[5]) + lumaOf(raw[6])) / 4f
-        // High-key scene (bright daylight / snow / white flash): do not suppress
-        if (topLuma > 180f) return
-
-        val c10 = raw[10]
-        val c13 = raw[13]
-        val bgLuma = maxOf(lumaOf(c10), lumaOf(c13))
-
-        val isSub11 = isSubtitle(raw[11], bgLuma)
-        val isSub12 = isSubtitle(raw[12], bgLuma)
-
-        if (isSub11 && isSub12) {
-            raw[11] = blend2(c10, c13, 0.67f)
-            raw[12] = blend2(c10, c13, 0.33f)
-        } else if (isSub11) {
-            raw[11] = blend2(c10, raw[12], 0.60f)
-        } else if (isSub12) {
-            raw[12] = blend2(c13, raw[11], 0.60f)
-        }
-
-        if (isSub11 || isSub12) {
-            val now = SystemClock.elapsedRealtime()
-            if (now - lastSubLog > 5_000) {
-                lastSubLog = now
-                Log.d(TAG, "subtitle suppressed: s11=$isSub11 s12=$isSub12 (bgLuma=${bgLuma.toInt()})")
-            }
-        }
-    }
-
-    private fun isSubtitle(rgb: Int, bgLuma: Float): Boolean {
-        val r = (rgb shr 16) and 0xff
-        val g = (rgb shr 8) and 0xff
-        val b = rgb and 0xff
-        val l = 0.299f * r + 0.587f * g + 0.114f * b
-
-        // Subtitles are bright text: must be at least luma 110
-        if (l < 110f) return false
-
-        // Contrast test: subtitle must stand out significantly against the background scene
-        if (l < bgLuma * 1.4f + 35f) return false
-
-        // Color test:
-        val maxC = maxOf(r, g, b)
-        val minC = minOf(r, g, b)
-
-        // White / grey subtitles: low color saturation
-        val isWhite = (maxC - minC) <= 40
-
-        // Yellow subtitles (e.g. Prime Video or user preference): high R & G, lower B
-        val isYellow = r >= 150 && g >= 130 && b <= 110 && (r - b) >= 45 && kotlin.math.abs(r - g) <= 45
-
-        return isWhite || isYellow
-    }
-
-    private fun lumaOf(rgb: Int): Float {
-        val r = (rgb shr 16) and 0xff
-        val g = (rgb shr 8) and 0xff
-        val b = rgb and 0xff
-        return 0.299f * r + 0.587f * g + 0.114f * b
-    }
-
-    /** A little more saturation; very dark colours keep theirs, so noise in black doesn't turn colourful. */
-    private fun enhance(rgb: Int): Int {
-        val r = (rgb shr 16 and 0xff).toFloat()
-        val g = (rgb shr 8 and 0xff).toFloat()
-        val b = (rgb and 0xff).toFloat()
-        val maxCh = maxOf(r, g, b)
-        val sat = 1f + (SATURATION - 1f) * ((maxCh - 8f) / 24f).coerceIn(0f, 1f)
-        val luma = 0.299f * r + 0.587f * g + 0.114f * b
-        fun ch(v: Float) = (luma + (v - luma) * sat).toInt().coerceIn(0, 255)
-        return (ch(r) shl 16) or (ch(g) shl 8) or ch(b)
     }
 
     private fun testing() = SystemClock.elapsedRealtime() < testUntil
@@ -424,7 +358,10 @@ class AmbilightService : Service() {
 
     companion object {
         const val ACTION_TEST = "local.ambilight.TEST"
-        private const val SATURATION = 1.25f
+        /** How often the preview on the screen gets new colours. */
+        private const val PREVIEW_MS = 100L
+        /** A little longer than the TV keeps its debugging dialog up (30 s). */
+        private const val AUTH_TIMEOUT_MS = 35_000L
 
         /** The strip gets a frame every 1/120 s: a new reading waits 4 ms on average for the next packet. */
         private const val FRAME_NS = 8_333_333L
