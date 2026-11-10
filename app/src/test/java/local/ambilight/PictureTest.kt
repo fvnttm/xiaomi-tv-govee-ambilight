@@ -5,11 +5,13 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PictureTest {
+    private val FULL = floatArrayOf(1f, 1f, 1f)
+
     private fun frames(zoneValue: Float, count: Int, dither: Picture.Dither?): List<Int> {
         val zones = Array(14) { FloatArray(3) { zoneValue } }
         val out = IntArray(4)
         return List(count) {
-            Picture.leds(zones, out, reverse = false, offset = 0, brightness = 100, dither = dither)
+            Picture.leds(zones, out, reverse = false, offset = 0, gains = FULL, dither = dither)
             out[0] shr 16 and 0xff
         }
     }
@@ -36,7 +38,7 @@ class PictureTest {
         val zones = Array(2) { FloatArray(3) }
         zones[0][0] = 255f
         val out = IntArray(4) // LED 1 sits a quarter from zone 0, LED 2 a quarter from zone 1 (smoothstep)
-        Picture.leds(zones, out, reverse = false, offset = 0, brightness = 100)
+        Picture.leds(zones, out, reverse = false, offset = 0, gains = FULL)
         val r1 = out[1] shr 16 and 0xff
         val r2 = out[2] shr 16 and 0xff
         assertEquals(255f, (r1 + r2).toFloat(), 1f)

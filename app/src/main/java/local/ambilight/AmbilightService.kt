@@ -45,6 +45,11 @@ class AmbilightService : Service() {
     @Volatile private var screenOn = true
     @Volatile private var session: Dadb? = null
     @Volatile private var testUntil = 0L
+    @Volatile private var whiteUntil = 0L
+    /** Brightness and calibration per channel, from the settings. */
+    @Volatile private var gains = floatArrayOf(1f, 1f, 1f)
+    /** The last frame sent while following the picture, for the fade-out; null once dark. */
+    @Volatile private var lastLeds: IntArray? = null
     private val wake = java.lang.Object()
 
     private var lastFrameLog = 0L
@@ -56,6 +61,7 @@ class AmbilightService : Service() {
 
     /** Black frame and WLED off, so the strip doesn't fall back to its own preset when the stream stops. */
     private fun blackout() {
+        lastLeds = null
         engine.reset()
         ddp.sendBlack(settings.ledCount)
         ddp.setOff()
@@ -86,11 +92,12 @@ class AmbilightService : Service() {
         val new = config.read()
         settings = new
         engine.setSmoothing(new.smoothing)
+        gains = gainsOf(new)
         if (new.espIp != old.espIp) {
             ddp.ip = new.espIp
             if (session != null) ddp.setOn()
         }
-        if (new.enabled != old.enabled || new.sides != old.sides) restartSession()
+        if (new.enabled != old.enabled || new.sides != old.sides || new.sampling != old.sampling) restartSession()
     }
 
     override fun onBind(intent: Intent?) = null
@@ -101,6 +108,7 @@ class AmbilightService : Service() {
         adb = AdbBridge(this)
         settings = config.read()
         engine.setSmoothing(settings.smoothing)
+        gains = gainsOf(settings)
         ddp.ip = settings.espIp
         startForeground(1, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
         screenOn = getSystemService(PowerManager::class.java).isInteractive
@@ -119,6 +127,11 @@ class AmbilightService : Service() {
             testUntil = if (testing()) 0 else SystemClock.elapsedRealtime() + 60_000
             // A running session shows the test from onFrame; otherwise wake the supervisor to show it.
             synchronized(wake) { wake.notifyAll() }
+        }
+        if (intent?.action == ACTION_WHITE) {
+            // Calibrated white on the whole strip while a session runs, or off again.
+            whiteUntil = if (white()) 0 else SystemClock.elapsedRealtime() + 120_000
+            Status.set { it.copy(white = white()) }
         }
         return START_STICKY
     }
@@ -145,6 +158,7 @@ class AmbilightService : Service() {
         while (alive) {
             when {
                 !settings.enabled -> {
+                    fadeOut()
                     blackout()
                     Status.set { it.copy(mode = "wyłączony") }
                     while (alive && !settings.enabled) {
@@ -153,6 +167,7 @@ class AmbilightService : Service() {
                     continue
                 }
                 !screenOn -> {
+                    fadeOut()
                     blackout()
                     Status.set { it.copy(mode = "TV w czuwaniu") }
                     while (alive && !screenOn) {
@@ -224,7 +239,21 @@ class AmbilightService : Service() {
             // before the next vsync returns the previous point (measured; without the margin colours flicker).
             // The session restarts when the refresh rate changes.
             val frameMs = kotlin.math.ceil(1000.0 / display.refreshRate).toInt() + 2
-            d.open(adb.daemonCommand(mode.physicalWidth, mode.physicalHeight, settings.sides, frameMs)).use { stream ->
+            val command = adb.daemonCommand(mode.physicalWidth, mode.physicalHeight, settings.sides, frameMs, settings.sampling.points)
+            d.open(command).use { stream ->
+                // While the app is open, read only its demo video. Writes go to a local socket: not on the UI thread.
+                val sendRegion = { r: IntArray? ->
+                    thread(name = "region") {
+                        runCatching {
+                            synchronized(stream) {
+                                stream.sink.writeUtf8(if (r == null) "R\n" else "R ${r.joinToString(" ")}\n").flush()
+                            }
+                        }
+                    }
+                    Unit
+                }
+                Demo.listener = sendRegion
+                Demo.region?.let(sendRegion)
                 Status.set { it.copy(picture = "uruchamianie odczytu…") }
                 engine.reset()
                 rendering = true
@@ -239,6 +268,7 @@ class AmbilightService : Service() {
                         }
                     }
                 } finally {
+                    Demo.listener = null
                     rendering = false
                     renderer.join(500)
                     Status.set { it.copy(testing = false) }
@@ -279,6 +309,9 @@ class AmbilightService : Service() {
         val zoneColours = Array(SEGMENTS) { FloatArray(3) }
         var leds = IntArray(0)
         val dither = Picture.Dither()
+        val white = Array(SEGMENTS) { FloatArray(3) { 255f } }
+        val frameGains = FloatArray(3)
+        val startedAt = SystemClock.elapsedRealtime()
         var lastPreview = 0L
         var next = System.nanoTime()
         while (rendering) {
@@ -289,10 +322,20 @@ class AmbilightService : Service() {
                 ddp.sendTest(s.ledCount, s.reverse, s.offset)
             } else {
                 if (leds.size != s.ledCount) leds = IntArray(s.ledCount)
-                val moving = engine.current(now, zoneColours)
+                var moving = engine.current(now, zoneColours)
+                // The strip comes up softly when a session starts (TV on, Ambilight switched on).
+                val fadeIn = if (s.fadeInMs <= 0) 1f else ((now - startedAt).toFloat() / s.fadeInMs).coerceIn(0f, 1f)
+                if (fadeIn < 1f) moving = true
+                val g = gains
+                for (c in 0 until 3) frameGains[c] = g[c] * fadeIn * fadeIn
+                val showWhite = white()
                 // Dither only while colours move: a still picture then gives identical frames, which Ddp drops.
-                Picture.leds(zoneColours, leds, s.reverse, s.offset.mod(s.ledCount), s.brightness, dither.takeIf { moving })
+                Picture.leds(
+                    if (showWhite) white else zoneColours, leds, s.reverse, s.offset.mod(s.ledCount), frameGains,
+                    dither.takeIf { moving && !showWhite },
+                )
                 ddp.sendFrame(leds)
+                if (!showWhite) lastLeds = leds.copyOf()
                 LatencyProbe.onOutput(
                     zoneColours.sumOf { maxOf(it[0], it[1], it[2]).toDouble() }.toFloat() / SEGMENTS / 255f,
                 )
@@ -306,9 +349,9 @@ class AmbilightService : Service() {
                     val edges = zoneColours.map { c ->
                         (Math.round(c[0]) shl 16) or (Math.round(c[1]) shl 8) or Math.round(c[2])
                     }
-                    Status.set { it.copy(segments = edges, mode = mode, testing = testing) }
-                } else if (old.mode != mode || old.testing != testing) {
-                    Status.set { it.copy(mode = mode, testing = testing) }
+                    Status.set { it.copy(segments = edges, mode = mode, testing = testing, white = white()) }
+                } else if (old.mode != mode || old.testing != testing || old.white != white()) {
+                    Status.set { it.copy(mode = mode, testing = testing, white = white()) }
                 }
             }
             next += FRAME_NS
@@ -318,6 +361,36 @@ class AmbilightService : Service() {
     }
 
     private fun testing() = SystemClock.elapsedRealtime() < testUntil
+
+    private fun white() = SystemClock.elapsedRealtime() < whiteUntil
+
+    private fun gainsOf(s: Settings): FloatArray {
+        val c = Calibration.gains(s)
+        return FloatArray(3) { c[it] * s.brightness / 100f }
+    }
+
+    /** Dims the last frame to black over the fade-out time (standby, Ambilight switched off), instead of at once. */
+    private fun fadeOut() {
+        val from = lastLeds ?: return
+        lastLeds = null
+        val ms = settings.fadeOutMs
+        if (ms <= 0) return
+        val out = IntArray(from.size)
+        val start = SystemClock.elapsedRealtime()
+        while (true) {
+            val x = (SystemClock.elapsedRealtime() - start).toFloat() / ms
+            if (x >= 1f) break
+            // shortcut: plain rounding, no dithering; the last steps near black may show, fine for a 1-4 s fade.
+            val k = (1f - x) * (1f - x)
+            for (i in from.indices) {
+                val c = from[i]
+                out[i] = (Math.round((c shr 16 and 0xff) * k) shl 16) or
+                    (Math.round((c shr 8 and 0xff) * k) shl 8) or Math.round((c and 0xff) * k)
+            }
+            ddp.sendFrame(out)
+            Thread.sleep(FRAME_NS / 1_000_000)
+        }
+    }
 
     /** "S reads=47.5 failed=0 bars=0,276" -> "odczyt sprzętowy, 48 punktów/s, pasy filmowe pominięte" */
     private fun describeStats(line: String): String {
@@ -360,6 +433,7 @@ class AmbilightService : Service() {
 
     companion object {
         const val ACTION_TEST = "local.ambilight.TEST"
+        const val ACTION_WHITE = "local.ambilight.WHITE"
         /** How often the preview on the screen gets new colours. */
         private const val PREVIEW_MS = 100L
         /** A little longer than the TV keeps its debugging dialog up (30 s). */

@@ -37,9 +37,9 @@ class AdbBridge(private val context: Context) {
      * Shell command that runs PixelDaemon from this app's APK as the shell user.
      * [frameMs] must cover one displayed frame at the current refresh rate (the HAL latches once per frame).
      */
-    fun daemonCommand(panelW: Int, panelH: Int, sides: Int, frameMs: Int): String {
+    fun daemonCommand(panelW: Int, panelH: Int, sides: Int, frameMs: Int, pointsPerSegment: Int): String {
         val apk = context.applicationInfo.sourceDir
         return "shell:CLASSPATH=$apk exec app_process /system/bin local.ambilight.PixelDaemon " +
-            "$panelW $panelH $sides ${SEGMENTS} $frameMs"
+            "$panelW $panelH $sides ${SEGMENTS} $frameMs $pointsPerSegment"
     }
 }

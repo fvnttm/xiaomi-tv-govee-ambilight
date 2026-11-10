@@ -14,6 +14,8 @@ object Status {
         val segments: List<Int> = List(SEGMENTS) { 0 },
         /** The segment test is lighting the strip. */
         val testing: Boolean = false,
+        /** The white test is lighting the strip (calibration). */
+        val white: Boolean = false,
     )
 
     val state = MutableStateFlow(State())

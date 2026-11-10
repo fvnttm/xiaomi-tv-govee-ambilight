@@ -63,18 +63,18 @@ object Picture {
 
     /**
      * Fills [out] (one 0xRRGGBB per LED) from the zone colours (picture values 0..255): the LED curve, smooth
-     * (Hermite) interpolation in light between the two nearest zones, [brightness] (percent), then 8 bits.
+     * (Hermite) interpolation in light between the two nearest zones, the per-channel [gains] (brightness,
+     * calibration and fades, 0..1), then 8 bits.
      * LED 0 of the path lands at [offset]; [reverse] runs the path the other way.
      *
      * With a [dither] state, the 8-bit rounding error is carried over to the next frame, so a slow fade in the
      * dark moves through in-between levels instead of visible 1/255 steps. Without one, values are rounded.
      */
     fun leds(
-        zones: Array<FloatArray>, out: IntArray, reverse: Boolean, offset: Int, brightness: Int, dither: Dither? = null,
+        zones: Array<FloatArray>, out: IntArray, reverse: Boolean, offset: Int, gains: FloatArray, dither: Dither? = null,
     ) {
         val n = out.size
         val count = zones.size
-        val scale = 255f * brightness / 100f
         val error = dither?.errors(n)
         for (i in 0 until n) {
             val u = ((i + 0.5f) / n * count - 0.5f).mod(count.toFloat())
@@ -86,7 +86,7 @@ object Picture {
             var rgb = 0
             for (c in 0 until 3) {
                 val light = light(zones[i0][c]) * (1f - t) + light(zones[i1][c]) * t
-                val v = light * scale
+                val v = light * 255f * gains[c]
                 val q = if (error == null) {
                     Math.round(v)
                 } else {

@@ -22,19 +22,23 @@ been tried.
 ## How it works
 
 1. **Starts on its own.** `BootReceiver` starts `AmbilightService` when the TV boots and after app updates. When
-   the TV goes into standby, the service sends a black frame and switches WLED off; when the TV wakes, it carries on.
+   the TV goes into standby (or Ambilight is switched off), the strip fades out over the *Wygaszanie* time and WLED
+   is switched off; when the TV wakes, it carries on and the strip fades in over the *Rozjaśnianie* time.
 2. **Permissions without a PC.** The service connects to the TV's own ADB on `127.0.0.1:5555` (with
    [dadb](https://github.com/mobile-dev-inc/dadb)) using its own key, "Ambilight@TV", and starts `PixelDaemon` as
    the `shell` user with `app_process`. Only a process like that may call the render HAL.
 3. **Reading the picture.** `PixelDaemon` calls `IRender`:
    - `OpenController` (code 69);
-   - `GetPixelInfo` (code 49) for points near the edges, one point in the middle of each of 14 zones round the
-     picture;
+   - `GetPixelInfo` (code 49) for points near the edges of 14 zones round the picture. With *Próbkowanie strefy*
+     at 2 or 4 points, each round reads the next point of every zone, spread along the zone's edge at two depths;
+     the zone's colour is the mean of its last readings, so a small object on one point doesn't recolour the whole
+     zone. A reading far from that mean (luma 64 of 255) replaces the others at once, so cuts stay fast;
    - `CloseController` (code 5).
 4. **Colours.** Each zone reading goes through a little extra saturation and an optional subtitle filter (the
    two middle zones of the bottom edge), then into `ColourEngine` (see below).
 5. **Sending.** A render thread makes a frame every 1/120 s: the zone colours at that moment, smooth (Hermite)
-   interpolation between neighbouring zones for every LED, the LED curve, then the brightness setting. `Ddp`
+   interpolation in light between neighbouring zones for every LED, then brightness and the calibration gains
+   per channel (see Calibration). `Ddp`
    sends it to UDP port 4048. A frame equal to the last one is sent twice more and then only every 250 ms, so
    a still picture costs 4 packets a second. `Ddp` switches WLED on and off through its JSON API
    (`POST /json/state`).
@@ -126,10 +130,27 @@ Measured on this TV with SurfaceFlinger statistics, 8 s per method:
 4. Open **Sterownik WLED** (WLED controller). The app lists the WLED devices it finds on the network (mDNS);
    pick yours, or type its address. The LED count is read from WLED.
 
+## The app
+
+Four sections in a rail on the left (**Start**, **Obraz**, **Kalibracja**, **Taśma**); each list explains its
+focused row in a panel on the right. Left and right change a row's value, OK steps it or runs it, Back returns to
+the rail. The app's labels are in Polish.
+
+**Demo while the app is open.** With the app on screen, the TV shows the app, so the strip would only light up
+with its dark edges. Instead the app plays a short silent clip (`res/raw/demo.mp4`) with the strip's real colours
+glowing round it, and the daemon reads only that clip: the app sends its rectangle in panel pixels to the daemon's
+stdin (`R x y w h`; `R` alone for the whole picture). The clip shows the cases ambilight has to get right: slow
+colour drift, a fade to black, a hard cut, colours rotating round the edges, small bright objects at the edges,
+fast red/green/blue cuts and a fade up to white. Each change of a setting shows on the strip at once. When the app
+goes to the background, the daemon reads the whole picture again. `tools/make_demo_video.py` makes the clip.
+
 ## Calibration
 
-The app's screen shows a preview of the colours round the screen and the state of the picture reading, the strip
-and ADB, and explains the focused setting at the bottom. The app's labels are in Polish.
+- **Kolor ściany** (wall colour: white, warm white, beige, grey, blue, green): the wall tints the strip's light,
+  so its tint is divided out per channel. **Temperatura bieli** (white point: warm, neutral, cool) and
+  **Czerwony / Zielony / Niebieski** (the strip's own balance, 50–100 %) come on top. The strongest channel always
+  stays at 100 %: calibration only takes light away. **Pokaż biel na taśmie** lights the whole strip with the
+  calibrated white for 2 minutes, to set the balance by eye, ideally in the evening with the room lights off.
 
 - **Test segmentów** (segment test, 60 s; press again to end it) lights picture zone 1 red, zone 2 yellow (it shows the direction),
   zone 8 green and zone 14 purple; the rest of the strip glows dim blue. The pattern goes through the same
@@ -142,6 +163,8 @@ and ADB, and explains the focused setting at the bottom. The app's labels are in
   Builds before this setting had *Reakcja*: *szybka* (fast) becomes *dynamiczna*, *płynna* (smooth) *standardowa*.
 - **Filtr napisów** (subtitle filter) stops white and yellow subtitles from lighting the middle of the bottom edge.
   It works with 4 sides only.
+- **Próbkowanie strefy** (zone sampling): *szybkie* 1 point per zone, *zrównoważone* 2 (default), *dokładne* 4.
+- **Wygaszanie** (fade out: at once, 1, 2 or 4 s) and **Rozjaśnianie** (fade in: at once, 0.5, 1 or 2 s).
 - **Test opóźnienia** (latency test, 30 s) flips the screen between black and white 20 times. It shows the median
   and worst time to the first reading that sees the change, to the colours sent to the strip starting to move
   (10 %) and to them reaching 90 %.
