@@ -91,7 +91,7 @@ class AmbilightService : Service() {
         val old = settings
         val new = config.read()
         settings = new
-        engine.setSmoothing(new.smoothing)
+        engine.setSmoothing(new.smoothing, new.blackFadeMs, new.glide)
         gains = gainsOf(new)
         if (new.espIp != old.espIp) {
             ddp.ip = new.espIp
@@ -107,7 +107,7 @@ class AmbilightService : Service() {
         config = Config(this)
         adb = AdbBridge(this)
         settings = config.read()
-        engine.setSmoothing(settings.smoothing)
+        engine.setSmoothing(settings.smoothing, settings.blackFadeMs, settings.glide)
         gains = gainsOf(settings)
         ddp.ip = settings.espIp
         startForeground(1, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)

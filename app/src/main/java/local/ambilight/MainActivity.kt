@@ -391,6 +391,18 @@ private fun PicturePage(s: Settings, status: Status.State, change: (Settings) ->
             onFocus, onStep = { d -> change(s.copy(smoothing = next(Smoothing.entries, s.smoothing, d))) },
         )
         Explained(
+            "black", "Gaszenie do czerni", if (s.blackFadeMs == 0) "jak profil" else "${s.blackFadeMs} ms",
+            "Jak szybko gaśnie fragment taśmy, gdy obraz przy tej krawędzi robi się czarny. Jak profil: miękko, " +
+                "jak w Ambilight (${s.smoothing.releaseMs.toInt()} ms). 400 lub 200 ms: bez długiego ogona.",
+            onFocus, onStep = { d -> change(s.copy(blackFadeMs = next(Config.BLACK_FADE_MS, s.blackFadeMs, d))) },
+        )
+        Explained(
+            "glide", "Drobne zmiany", if (s.glide) "płynnie" else "od razu",
+            "Płynnie: drobne zmiany obrazu (powolne ściemnianie, ruch kamery) są rozkładane na czas do następnego " +
+                "odczytu strefy, bez drobnych schodków, ale do ok. 0,3 s później. Od razu: bez tego opóźnienia.",
+            onFocus,
+        ) { change(s.copy(glide = !s.glide)) }
+        Explained(
             "brightness", "Jasność", "${s.brightness}%",
             "Jasność całej taśmy. Liczona przed zaokrągleniem do 8 bitów, więc nie dodaje schodków w ciemnych scenach.",
             onFocus, onStep = { d -> change(s.copy(brightness = (s.brightness + 10 * d).coerceIn(10, 100))) },
@@ -401,7 +413,8 @@ private fun PicturePage(s: Settings, status: Status.State, change: (Settings) ->
             "Każda strefa jest czytana po kolei w ${s.sampling.points} " +
                 (if (s.sampling.points == 1) "punkcie" else "punktach") +
                 ", a jej kolor to średnia. Mały obiekt w jednym punkcie nie przestawia całej strefy; cięcia scen " +
-                "działają od razu. Szybkie: 1 punkt, dokładne: 4 (średnia z ok. 1,2 s).",
+                "działają od razu. Szybkie: 1 punkt, bez opóźnienia uśredniania. Dokładne: 4 punkty, średnia " +
+                "z ok. 1,2 s, więc powolne zmiany dochodzą później.",
             onFocus, onStep = { d -> change(s.copy(sampling = next(Sampling.entries, s.sampling, d))) },
         )
         Explained(

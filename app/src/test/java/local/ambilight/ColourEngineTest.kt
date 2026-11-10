@@ -131,6 +131,31 @@ class ColourEngineTest {
     }
 
     @Test
+    fun fadeToBlackCanBeFasterThanTheProfile() {
+        engine.setSmoothing(Smoothing.STANDARD, blackMs = 200)
+        engine.onReading(0, 0xc8c8c8, 0)
+        at(3_000, 0)
+        engine.onReading(0, 0x000000, 3_000)
+        val t10 = (3_000..6_000).first { at(it.toLong(), 0)[0] <= 20f } - 3_000
+        assertEquals(200f, t10.toFloat(), 15f)
+    }
+
+    @Test
+    fun withoutGlideSmallChangesStartAtTheirFullPace() {
+        fun after(glide: Boolean): Float {
+            val e = ColourEngine(zones).apply { setSmoothing(Smoothing.STANDARD, glideSmall = glide) }
+            val o = Array(zones) { FloatArray(3) }
+            e.onReading(0, 0x646464, 0)
+            for (t in 0L..3_000L step 8) e.current(t, o)
+            e.onReading(0, 0x787878, 3_290) // +20, read again after a normal round
+            for (t in 3_008L..3_400L step 8) e.current(t, o)
+            return o[0][0]
+        }
+        assertTrue("gliding lags: ${after(true)} < ${after(false)}", after(true) < after(false) - 3f)
+        assertEquals("only the spring: half way after 110 ms", 110f, after(false), 1.5f)
+    }
+
+    @Test
     fun stillWhenSettled() {
         engine.onReading(0, 0x808080, 0)
         assertTrue(engine.current(100, out))

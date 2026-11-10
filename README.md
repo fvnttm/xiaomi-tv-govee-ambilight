@@ -164,6 +164,11 @@ goes to the background, the daemon reads the whole picture again. `tools/make_de
 - **Filtr napisów** (subtitle filter) stops white and yellow subtitles from lighting the middle of the bottom edge.
   It works with 4 sides only.
 - **Próbkowanie strefy** (zone sampling): *szybkie* 1 point per zone, *zrównoważone* 2 (default), *dokładne* 4.
+  A cut is a point that changes a lot since its own last reading; points of one zone that simply differ (a bright
+  window and a dark wall) are averaged, not taken for a cut.
+- **Gaszenie do czerni** (fade to black: as the profile releases, 400 ms or 200 ms) for a zone whose picture went
+  black, and **Drobne zmiany** (small changes: *płynnie* glides them over the time between readings, up to ~0.3 s
+  later; *od razu* leaves only the spring).
 - **Wygaszanie** (fade out: at once, 1, 2 or 4 s) and **Rozjaśnianie** (fade in: at once, 0.5, 1 or 2 s).
 - **Test opóźnienia** (latency test, 30 s) flips the screen between black and white 20 times. It shows the median
   and worst time to the first reading that sees the change, to the colours sent to the strip starting to move

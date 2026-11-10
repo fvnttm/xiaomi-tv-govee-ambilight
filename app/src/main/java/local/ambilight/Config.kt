@@ -30,6 +30,10 @@ data class Settings(
     val brightness: Int,
     /** How softly the strip follows the picture. */
     val smoothing: Smoothing,
+    /** Time for a zone whose picture went black to fade out (ms; 0: the profile's release time). */
+    val blackFadeMs: Int,
+    /** Small changes glide over the time between readings: smoother, but up to ~0.3 s later. */
+    val glide: Boolean,
     val sampling: Sampling,
     /** How long the strip fades out on standby or when switched off, and in when it starts (ms, 0: at once). */
     val fadeOutMs: Int,
@@ -61,6 +65,8 @@ class Config(context: Context) {
         smoothing = enumOf("smoothing", Smoothing.entries)
             // Earlier builds stored only fast (false) or smooth (true) reactions.
             ?: if (prefs.getBoolean("smooth", true)) Smoothing.STANDARD else Smoothing.DYNAMIC,
+        blackFadeMs = prefs.getInt("black_fade_ms", 0).let { if (it in BLACK_FADE_MS) it else 0 },
+        glide = prefs.getBoolean("glide", true),
         sampling = enumOf("sampling", Sampling.entries) ?: Sampling.BALANCED,
         fadeOutMs = prefs.getInt("fade_out_ms", 2000).let { if (it in FADE_OUT_MS) it else 2000 },
         fadeInMs = prefs.getInt("fade_in_ms", 1000).let { if (it in FADE_IN_MS) it else 1000 },
@@ -86,6 +92,8 @@ class Config(context: Context) {
         .putInt("brightness", s.brightness)
         .putString("smoothing", s.smoothing.name)
         .remove("smooth")
+        .putInt("black_fade_ms", s.blackFadeMs)
+        .putBoolean("glide", s.glide)
         .putString("sampling", s.sampling.name)
         .putInt("fade_out_ms", s.fadeOutMs)
         .putInt("fade_in_ms", s.fadeInMs)
@@ -101,5 +109,7 @@ class Config(context: Context) {
         const val MIN_GAIN = 50
         val FADE_OUT_MS = listOf(0, 1000, 2000, 4000)
         val FADE_IN_MS = listOf(0, 500, 1000, 2000)
+        /** 0: as the profile releases. */
+        val BLACK_FADE_MS = listOf(0, 400, 200)
     }
 }

@@ -46,6 +46,8 @@ class ColourEngine(private val zones: Int) {
     private val glideMs = LongArray(zones)
     /** The zone is following a cut: both directions move at the cut pace until its next real reading. */
     private val cutPace = BooleanArray(zones)
+    /** The zone's last reading was black: it fades out at [toBlack] when that is set. */
+    private val heading0 = BooleanArray(zones)
     private var steppedTo = Long.MIN_VALUE
 
     /** Last real reading of each zone (after the black gate), -1 before the first one. */
@@ -62,12 +64,21 @@ class ColourEngine(private val zones: Int) {
     private var attack = omega(Smoothing.STANDARD.attackMs)
     private var release = omega(Smoothing.STANDARD.releaseMs)
     private var cut = omega(Smoothing.STANDARD.cutMs)
+    /** Pace of a zone going black; 0: the release pace. */
+    private var toBlack = 0f
+    private var glide = true
 
+    /**
+     * [s]: the profile. [blackMs]: time to fade a zone that went black (0: the profile's release time).
+     * [glideSmall]: whether small changes glide over the time between readings (smoother, a little later).
+     */
     @Synchronized
-    fun setSmoothing(s: Smoothing) {
+    fun setSmoothing(s: Smoothing, blackMs: Int = 0, glideSmall: Boolean = true) {
         attack = omega(s.attackMs)
         release = omega(s.releaseMs)
         cut = omega(s.cutMs)
+        toBlack = if (blackMs > 0) omega(blackMs.toFloat()) else 0f
+        glide = glideSmall
     }
 
     @Synchronized
@@ -76,6 +87,7 @@ class ColourEngine(private val zones: Int) {
             pos[z].fill(0f); vel[z].fill(0f); goal[z].fill(0f); glideFrom[z].fill(0f)
             glideAt[z] = 0; glideMs[z] = 0
             cutPace[z] = false
+            heading0[z] = false
             lastReading[z] = -1; readAt[z] = Long.MIN_VALUE; dark[z] = true
         }
         steppedTo = Long.MIN_VALUE
@@ -94,13 +106,14 @@ class ColourEngine(private val zones: Int) {
         lastReading[zone] = gated
         readAt[zone] = now
         cutPace[zone] = false
+        heading0[zone] = gated == 0
         val big = maxOf(
             abs((gated shr 16 and 0xff) - goal[zone][0]),
             abs((gated shr 8 and 0xff) - goal[zone][1]),
             abs((gated and 0xff) - goal[zone][2]),
         ) > GLIDE_MAX
         val interval = if (previous < 0) 0L else (now - previousAt).coerceIn(0L, MAX_GLIDE_MS)
-        setTarget(zone, gated, now, if (big || gated == 0) 0L else interval)
+        setTarget(zone, gated, now, if (big || gated == 0 || !glide) 0L else interval)
 
         // A zone whose last reading is older than the last cut is only catching up with it: its jump is that
         // same cut, not a new one (counting it would apply the cut's brightness change a second time).
@@ -139,6 +152,7 @@ class ColourEngine(private val zones: Int) {
         val w = when {
             cutPace[z] -> cut
             goal > x -> attack
+            heading0[z] && toBlack > 0f -> toBlack
             else -> release
         }
         val e = x - goal

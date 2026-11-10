@@ -8,7 +8,8 @@ import org.junit.Test
 class CalibrationTest {
     private val base = Settings(
         enabled = true, reverse = false, sides = 4, filterSubtitles = true, offset = 0, espIp = "", espName = "",
-        ledCount = 72, brightness = 100, smoothing = Smoothing.STANDARD, sampling = Sampling.BALANCED,
+        ledCount = 72, brightness = 100, smoothing = Smoothing.STANDARD, blackFadeMs = 0, glide = true,
+        sampling = Sampling.BALANCED,
         fadeOutMs = 2000, fadeInMs = 1000, wall = 0, whitePoint = 1, gainR = 100, gainG = 100, gainB = 100,
     )
 

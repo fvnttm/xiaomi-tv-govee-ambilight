@@ -39,7 +39,7 @@ object PixelDaemon {
     private const val HEX = "0123456789abcdef"
     /** At most this many points per segment. */
     private const val MAX_POINTS = 4
-    /** A reading this far (luma, 0..255) from a segment's mean replaces its other readings: a cut. */
+    /** A point whose reading moves this far (luma, 0..255) from its own last one is a cut. */
     private const val CUT_LUMA = 64
 
     private var controller = 0
@@ -100,7 +100,7 @@ object PixelDaemon {
         var round = 0
         val colours = IntArray(segments)
         val recent = Array(segments) { IntArray(perSegment) }
-        val filled = IntArray(segments)
+        val pointsRead = IntArray(segments)
         val probePoints = barProbePoints(w, h)
         val probeSamples = IntArray(probePoints.size)
         var probeIdx = -1
@@ -114,7 +114,7 @@ object PixelDaemon {
             if (region != area) {
                 area = region
                 points = samplePoints(area(), w, h, sides, segments, perSegment)
-                filled.fill(0) // readings of the old area don't belong to the new one
+                pointsRead.fill(0) // readings of the old area don't belong to the new one
             }
             val k = round++ % perSegment
             for (s in 0 until segments) {
@@ -122,7 +122,7 @@ object PixelDaemon {
                 if (px == null) {
                     failed++
                 } else {
-                    colours[s] = remember(recent[s], filled, s, k, px, colours[s])
+                    colours[s] = remember(recent[s], pointsRead, s, k, px)
                 }
                 reads++
                 line.setLength(0)
@@ -148,7 +148,7 @@ object PixelDaemon {
                     if (seen == candidate && seen != bars && area == null) {
                         bars = seen
                         points = samplePoints(area(), w, h, sides, segments, perSegment)
-                        filled.fill(0)
+                        pointsRead.fill(0)
                     }
                     candidate = seen
                     probeIdx = -1
@@ -176,16 +176,24 @@ object PixelDaemon {
     }
 
     /**
-     * Stores reading [px] as the [k]th of a segment's last readings and returns their mean. A reading far from
-     * the mean (a cut, a fade) replaces all of them, so the segment jumps with the picture instead of lagging.
+     * Stores reading [px] of point [k] of segment [s] and returns the mean of the segment's points.
+     *
+     * A cut is a point that changed a lot since ITS OWN last reading: then all points take [px], so the segment
+     * jumps with the picture instead of lagging. Points of one segment may differ a lot from each other (a bright
+     * window and a dark wall): that is the picture, not a cut, and must not reset the mean, or the segment would
+     * flip between its points every round. [seen] holds, per segment, a bit for each point read since the last
+     * reset; a point without a reading of its own is never compared.
      */
-    internal fun remember(recent: IntArray, filled: IntArray, s: Int, k: Int, px: Int, mean: Int): Int {
-        if (filled[s] == 0 || kotlin.math.abs(luma(px) - luma(mean)) >= CUT_LUMA) {
+    internal fun remember(recent: IntArray, seen: IntArray, s: Int, k: Int, px: Int): Int {
+        val bit = 1 shl k
+        val cut = seen[s] and bit != 0 && kotlin.math.abs(luma(px) - luma(recent[k])) >= CUT_LUMA
+        if (seen[s] == 0 || cut) {
             recent.fill(px)
-            filled[s] = recent.size
+            seen[s] = bit
             return px
         }
         recent[k] = px
+        seen[s] = seen[s] or bit
         var r = 0; var g = 0; var b = 0
         for (c in recent) { r += c shr 16 and 0xff; g += c shr 8 and 0xff; b += c and 0xff }
         val n = recent.size
