@@ -85,7 +85,7 @@ class AmbilightService : Service() {
         val old = settings
         val new = config.read()
         settings = new
-        engine.setSmooth(new.smooth)
+        engine.setSmoothing(new.smoothing)
         if (new.espIp != old.espIp) {
             ddp.ip = new.espIp
             if (session != null) ddp.setOn()
@@ -100,7 +100,7 @@ class AmbilightService : Service() {
         config = Config(this)
         adb = AdbBridge(this)
         settings = config.read()
-        engine.setSmooth(settings.smooth)
+        engine.setSmoothing(settings.smoothing)
         ddp.ip = settings.espIp
         startForeground(1, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
         screenOn = getSystemService(PowerManager::class.java).isInteractive
@@ -278,6 +278,7 @@ class AmbilightService : Service() {
         runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY) }
         val zoneColours = Array(SEGMENTS) { FloatArray(3) }
         var leds = IntArray(0)
+        val dither = Picture.Dither()
         var lastPreview = 0L
         var next = System.nanoTime()
         while (rendering) {
@@ -288,8 +289,9 @@ class AmbilightService : Service() {
                 ddp.sendTest(s.ledCount, s.reverse, s.offset)
             } else {
                 if (leds.size != s.ledCount) leds = IntArray(s.ledCount)
-                engine.current(now, zoneColours)
-                Picture.leds(zoneColours, leds, s.reverse, s.offset.mod(s.ledCount), s.brightness)
+                val moving = engine.current(now, zoneColours)
+                // Dither only while colours move: a still picture then gives identical frames, which Ddp drops.
+                Picture.leds(zoneColours, leds, s.reverse, s.offset.mod(s.ledCount), s.brightness, dither.takeIf { moving })
                 ddp.sendFrame(leds)
                 LatencyProbe.onOutput(
                     zoneColours.sumOf { maxOf(it[0], it[1], it[2]).toDouble() }.toFloat() / SEGMENTS / 255f,

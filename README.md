@@ -44,22 +44,40 @@ been tried.
 The hardware gives about one point per frame, so each of the 14 zones is read only every ~0.29 s. `ColourEngine`
 keeps the strip quick and smooth anyway:
 
-- **Fixed-time transitions.** A zone moves to its newest reading in 20 ms for big changes and fades to black, and
-  over up to 200 ms for small ones (noise, film grain, slow pans). R, G and B move by the same fraction, so the
-  colour goes in a straight line instead of changing hue on the way. A transition ends exactly on its target:
-  no long dim tail.
+- **Continuous motion, like a spring.** Each channel of each zone follows its newest reading like a critically
+  damped spring: a new reading only moves the target, the channel keeps its speed, so there is no "jump, then wait
+  for the next reading" staircase. The motion starts in the next frame (every 8 ms).
+- **Faster up, softer down.** Getting brighter reaches 90 % in the *attack* time, getting darker in the longer
+  *release* time, per channel. In a change of colour the new one comes in quickly while the old one fades out, so
+  the light passes through a bright mix instead of dimming half way.
+- **Gliding small changes.** A reading within 32 (of 255) of the target (slow fades, pans, grain) glides the
+  target there over the time until the zone's next reading, so a gradual change stays gradual. Bigger changes
+  move the target at once.
 - **Cut and fade prediction.** When two of the last three readings change brightness a lot the same way, the
   zones not read yet get that change at once: their own hue at the new brightness, or the new scene's mean
-  colour if they were dark. Each takes its real colour when it is read.
-- **Picture values, LED curve at the end.** Transitions are computed on the picture's own (gamma-encoded) values,
-  so fades look even. Only the final output goes through an LED curve (gamma 2.0), so dark scenes stay dark.
-  WLED applies no gamma to realtime data by default, so leave that as it is.
-- **Black gate.** A zone goes off at or below 10 (of 255) and lights again only from 18, so it doesn't flicker at
-  the edge.
+  colour if they were dark. All of them move together at the *cut* pace; a later real reading redirects them.
+- **Soft black.** A zone's target is off at or below 10 (of 255) and lights again only from 18 (no flicker at the
+  edge); it fades there at the release pace and ends at a true 0.
+- **Picture values, LED curve at the end.** The motion is computed on the picture's own (gamma-encoded) values,
+  so fades look even. The LED curve (gamma 2.0) comes at the end, then the mix between zones is done in light and
+  the brightness setting is applied before rounding to 8 bits. WLED applies no gamma to realtime data by default,
+  so leave that as it is.
+- **Dithering.** While colours move, the 8-bit rounding error is carried to the next frame, so slow fades in the
+  dark pass through in-between levels instead of visible 1/255 steps. A still picture gives identical frames, so
+  only a few packets a second are sent.
 
-From a full-screen change to 90 % on the output, measured by a simulation on the real `ColourEngine` with the
-TV's reading rhythm (`LatencySimulationTest`): median **48 ms**, worst **62 ms** (60 ms transitions and 60 packets a second gave 80 ms; the first smoothing
-356 ms). Add the way from the panel to the HAL (about a frame) and the network.
+Profiles (**Płynność** in the app), times to 90 %:
+
+| Profile | attack | release | cut |
+|---|---|---|---|
+| *dynamiczna* (dynamic) | 150 ms | 500 ms | 100 ms |
+| *standardowa* (standard, default) | 250 ms | 700 ms | 120 ms |
+| *spokojna* (calm) | 500 ms | 1200 ms | 200 ms |
+
+Simulated on the real `ColourEngine` with the TV's reading rhythm (`LatencySimulationTest`), from a full-screen
+black/white change: the strip starts moving (10 %) after a median **~50 ms** in every profile, and reaches 90 %
+after **135 / 155 / 238 ms** (dynamic / standard / calm). A slow fade comes out in even steps, with no flat frames
+in between. Add the way from the panel to the HAL (about a frame) and the network.
 
 ### The catch in `GetPixelInfo`
 
@@ -120,12 +138,13 @@ and ADB, and explains the focused setting at the bottom. The app's labels are in
 - **Obraz testowy** (test picture) has coloured edges: left red, top green, right blue, bottom yellow.
 - **Kierunek** (strip direction), **Układ** (3 or 4 sides) and **Przesunięcie** (offset: left and right move
   it by one LED) match the mapping to how the strip is mounted. **Liczba diod** is the LED count.
-- **Jasność** (brightness, 10–100 %) and **Reakcja** (response): *szybka* (fast) uses the 20 ms transitions,
-  *płynna* (smooth) 60 ms ones.
+- **Jasność** (brightness, 10–100 %) and **Płynność** (smoothness): the profiles above; left and right switch them.
+  Builds before this setting had *Reakcja*: *szybka* (fast) becomes *dynamiczna*, *płynna* (smooth) *standardowa*.
 - **Filtr napisów** (subtitle filter) stops white and yellow subtitles from lighting the middle of the bottom edge.
   It works with 4 sides only.
 - **Test opóźnienia** (latency test, 30 s) flips the screen between black and white 20 times. It shows the median
-  and worst time to the first reading that sees the change and to the colours sent to the strip reaching 90 %.
+  and worst time to the first reading that sees the change, to the colours sent to the strip starting to move
+  (10 %) and to them reaching 90 %.
   Add the network to the second number; to see the whole chain, film the TV and the strip with a phone in slow
   motion during the test.
 

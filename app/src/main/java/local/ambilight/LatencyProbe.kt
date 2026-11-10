@@ -7,7 +7,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 /**
  * Measures the delay from a black/white flip on screen (the "Test opóźnienia" screen) to:
  *  - read: the first zone read that sees the new picture;
- *  - output: the colours sent to the strip reaching 90 % of the way to the new picture.
+ *  - start: the colours sent to the strip moving 10 % of the way to the new picture;
+ *  - output: the colours sent to the strip reaching 90 % of the way (the rest is the chosen smoothness).
  * The screen and the service run in one process, so both sides use SystemClock.elapsedRealtime().
  * The time is taken at the start of the frame that draws the flip, so the panel shows it ~1 frame later.
  */
@@ -16,12 +17,14 @@ object LatencyProbe {
         val running: Boolean = false,
         val flips: Int = 0,
         val read: List<Long> = emptyList(),
+        val start: List<Long> = emptyList(),
         val output: List<Long> = emptyList(),
     ) {
         fun describe(): String {
             fun stats(v: List<Long>) =
                 if (v.isEmpty()) "brak" else "mediana ${v.sorted()[v.size / 2]} ms, maks. ${v.max()} ms"
             return "Odczyt obrazu: ${stats(read)} (${read.size}/$flips)\n" +
+                "Taśma rusza (10%): ${stats(start)} (${start.size}/$flips)\n" +
                 "Kolor na taśmę (90%): ${stats(output)} (${output.size}/$flips)"
         }
     }
@@ -32,11 +35,13 @@ object LatencyProbe {
     @Volatile private var flipAt = 0L
     @Volatile private var white = false
     @Volatile private var readPending = false
+    @Volatile private var startPending = false
     @Volatile private var outputPending = false
 
     fun start() = synchronized(this) {
         active = true
         readPending = false
+        startPending = false
         outputPending = false
         result.value = Result(running = true)
     }
@@ -47,6 +52,7 @@ object LatencyProbe {
         flipAt = SystemClock.elapsedRealtime()
         white = toWhite
         readPending = true
+        startPending = true
         outputPending = true
         result.value = result.value.copy(flips = result.value.flips + 1)
     }
@@ -61,26 +67,30 @@ object LatencyProbe {
     fun onRead(zones: IntArray) {
         if (!readPending) return
         val seen = zones.any { c -> if (white) maxChannel(c) >= 200 else maxChannel(c) <= 30 }
-        if (seen) record(read = true)
+        if (seen) record(Kind.READ)
     }
 
     /** Mean brightness (0..1, before the LED curve) of what is being sent to the strip. */
     fun onOutput(level: Float) {
-        if (!outputPending) return
-        if (if (white) level >= 0.9f else level <= 0.1f) record(read = false)
+        if (startPending && (if (white) level >= 0.1f else level <= 0.9f)) record(Kind.START)
+        if (outputPending && (if (white) level >= 0.9f else level <= 0.1f)) record(Kind.OUTPUT)
     }
 
-    private fun record(read: Boolean) = synchronized(this) {
-        val pending = if (read) readPending else outputPending
+    private enum class Kind { READ, START, OUTPUT }
+
+    private fun record(kind: Kind) = synchronized(this) {
+        val pending = when (kind) {
+            Kind.READ -> readPending
+            Kind.START -> startPending
+            Kind.OUTPUT -> outputPending
+        }
         if (!active || !pending) return@synchronized
         val ms = SystemClock.elapsedRealtime() - flipAt
         val r = result.value
-        if (read) {
-            readPending = false
-            result.value = r.copy(read = r.read + ms)
-        } else {
-            outputPending = false
-            result.value = r.copy(output = r.output + ms)
+        result.value = when (kind) {
+            Kind.READ -> { readPending = false; r.copy(read = r.read + ms) }
+            Kind.START -> { startPending = false; r.copy(start = r.start + ms) }
+            Kind.OUTPUT -> { outputPending = false; r.copy(output = r.output + ms) }
         }
     }
 

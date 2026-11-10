@@ -62,25 +62,57 @@ object Picture {
     }
 
     /**
-     * Fills [out] (one 0xRRGGBB per LED) from the zone colours (picture values 0..255): smooth (Hermite)
-     * interpolation between the two nearest zones, the LED curve, then [brightness] (percent). LED 0 of the path
-     * lands at [offset]; [reverse] runs the path the other way.
+     * Fills [out] (one 0xRRGGBB per LED) from the zone colours (picture values 0..255): the LED curve, smooth
+     * (Hermite) interpolation in light between the two nearest zones, [brightness] (percent), then 8 bits.
+     * LED 0 of the path lands at [offset]; [reverse] runs the path the other way.
+     *
+     * With a [dither] state, the 8-bit rounding error is carried over to the next frame, so a slow fade in the
+     * dark moves through in-between levels instead of visible 1/255 steps. Without one, values are rounded.
      */
-    fun leds(zones: Array<FloatArray>, out: IntArray, reverse: Boolean, offset: Int, brightness: Int) {
+    fun leds(
+        zones: Array<FloatArray>, out: IntArray, reverse: Boolean, offset: Int, brightness: Int, dither: Dither? = null,
+    ) {
         val n = out.size
         val count = zones.size
+        val scale = 255f * brightness / 100f
+        val error = dither?.errors(n)
         for (i in 0 until n) {
             val u = ((i + 0.5f) / n * count - 0.5f).mod(count.toFloat())
             val i0 = u.toInt().mod(count)
             val i1 = (i0 + 1) % count
             val f = u - u.toInt()
             val t = f * f * (3f - 2f * f)
+            val led = ((if (reverse) n - 1 - i else i) + offset).mod(n)
             var rgb = 0
             for (c in 0 until 3) {
-                val v = Math.round(zones[i0][c] * (1f - t) + zones[i1][c] * t).coerceIn(0, 255)
-                rgb = (rgb shl 8) or (ColourEngine.OUTPUT[v] * brightness + 50) / 100
+                val light = light(zones[i0][c]) * (1f - t) + light(zones[i1][c]) * t
+                val v = light * scale
+                val q = if (error == null) {
+                    Math.round(v)
+                } else {
+                    val k = led * 3 + c
+                    // shortcut: a fixed 0.5 threshold, no blue noise; fine at 120 frames/s on 72 LEDs.
+                    Math.round(v + error[k]).also { error[k] = if (v < 0.01f) 0f else v + error[k] - it }
+                }
+                rgb = (rgb shl 8) or q.coerceIn(0, 255)
             }
-            out[((if (reverse) n - 1 - i else i) + offset).mod(n)] = rgb
+            out[led] = rgb
+        }
+    }
+
+    /** Picture value (0..255, fractional) -> light 0..1 through the LED curve. */
+    private fun light(v: Float): Float {
+        val x = v.coerceIn(0f, 255f) / 255f
+        return x * x // ColourEngine.OUTPUT_GAMMA = 2
+    }
+
+    /** Rounding error carried between frames, per LED and channel. Used by the render thread only. */
+    class Dither {
+        private var error = FloatArray(0)
+
+        fun errors(leds: Int): FloatArray {
+            if (error.size != leds * 3) error = FloatArray(leds * 3)
+            return error
         }
     }
 }

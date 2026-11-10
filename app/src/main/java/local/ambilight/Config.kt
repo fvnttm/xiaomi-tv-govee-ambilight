@@ -21,8 +21,8 @@ data class Settings(
     val ledCount: Int,
     /** Strip brightness in percent. */
     val brightness: Int,
-    /** Slower, softer transitions instead of the fastest ones. */
-    val smooth: Boolean,
+    /** How softly the strip follows the picture. */
+    val smoothing: Smoothing,
 )
 
 /** User settings, shared by the service and the screen. */
@@ -40,7 +40,10 @@ class Config(context: Context) {
         // An earlier build stored 216 for the 72-LED strip it was made for.
         ledCount = prefs.getInt("led_count", 72).let { if (it == 216) 72 else it }.coerceIn(1, MAX_LEDS),
         brightness = prefs.getInt("brightness", 100).coerceIn(10, 100),
-        smooth = prefs.getBoolean("smooth", false),
+        smoothing = prefs.getString("smoothing", null)
+            ?.let { name -> Smoothing.entries.firstOrNull { it.name == name } }
+            // Earlier builds stored only fast (false) or smooth (true) reactions.
+            ?: if (prefs.getBoolean("smooth", true)) Smoothing.STANDARD else Smoothing.DYNAMIC,
     )
 
     fun write(s: Settings) = prefs.edit()
@@ -53,7 +56,8 @@ class Config(context: Context) {
         .putString("esp_name", s.espName)
         .putInt("led_count", s.ledCount)
         .putInt("brightness", s.brightness)
-        .putBoolean("smooth", s.smooth)
+        .putString("smoothing", s.smoothing.name)
+        .remove("smooth")
         .apply()
 
     companion object {

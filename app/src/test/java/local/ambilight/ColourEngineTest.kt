@@ -1,54 +1,75 @@
 package local.ambilight
 
-import local.ambilight.ColourEngine.Companion.FAST_MS
-import local.ambilight.ColourEngine.Companion.SLOW_MS
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ColourEngineTest {
     private val zones = 14
-    private val engine = ColourEngine(zones)
+    private val engine = ColourEngine(zones).apply { setSmoothing(Smoothing.STANDARD) }
     private val out = Array(zones) { FloatArray(3) }
+    private val s = Smoothing.STANDARD
 
+    /** Steps the engine like the render thread (every 8 ms) up to [t]; returns zone [zone] at [t]. */
+    private var clock = 0L
     private fun at(t: Long, zone: Int): FloatArray {
+        while (clock + 8 < t) { clock += 8; engine.current(clock, out) }
+        clock = t
         engine.current(t, out)
-        return out[zone]
+        return out[zone].copyOf()
     }
 
     /** Every zone read once, in order, one per 20 ms from [t0]; returns the time after the last one. */
     private fun readAll(colour: Int, t0: Long): Long {
-        for (z in 0 until zones) engine.onReading(z, colour, t0 + z * 20L)
+        for (z in 0 until zones) { at(t0 + z * 20L, 0); engine.onReading(z, colour, t0 + z * 20L) }
         return t0 + zones * 20L
     }
 
     @Test
-    fun fadeToBlackEndsExactlyAfterFastTime() {
+    fun startsAtOnceAndReachesNinetyPercentInAttackTime() {
+        at(0, 0)
         engine.onReading(0, 0xc8c8c8, 0)
-        assertEquals(200f, at(1_000, 0)[0], 0.01f)
-        engine.onReading(0, 0x000000, 1_000)
-        val half = at(1_000 + FAST_MS / 2, 0)[0]
-        assertTrue("half way it is between: $half", half in 1f..199f)
-        assertEquals(0f, at(1_000 + FAST_MS, 0)[0], 0f)
+        assertTrue("moves within a frame", at(8, 0)[0] > 0.5f)
+        val t90 = (0..2_000).first { at(it.toLong(), 0)[0] >= 180f }
+        assertEquals(s.attackMs, t90.toFloat(), 10f)
     }
 
     @Test
-    fun colourMovesInAStraightLine() {
-        engine.onReading(0, 0xc80000, 0)
-        engine.onReading(0, 0x0000c8, 1_000)
-        for (t in listOf(1_002L, 1_007L, 1_013L, 1_018L)) {
-            val c = at(t, 0)
-            assertEquals("red + blue stays 200 at $t", 200f, c[0] + c[2], 0.01f)
-            assertEquals(0f, c[1], 0.01f)
+    fun fadesOutSlowerThanItLightsAndEndsAtBlack() {
+        engine.onReading(0, 0xc8c8c8, 0)
+        at(3_000, 0)
+        engine.onReading(0, 0x000000, 3_000)
+        val t10 = (3_000..6_000).first { at(it.toLong(), 0)[0] <= 20f } - 3_000
+        assertEquals(s.releaseMs, t10.toFloat(), 15f)
+        assertEquals("off, no glimmer", 0f, at(6_000, 0)[0], 0f)
+    }
+
+    @Test
+    fun aNewReadingKeepsTheMotionGoing() {
+        engine.onReading(0, 0x646464, 0)
+        at(100, 0)
+        val before = at(100, 0)[0]
+        engine.onReading(0, 0xc8c8c8, 100) // a further step up mid-way
+        var lastStep = at(108, 0)[0] - before
+        var last = before + lastStep
+        for (t in 116L..400L step 8) { // no stop and restart: speed changes gradually
+            val v = at(t, 0)[0]
+            val step = v - last
+            assertTrue("never goes back at $t", step >= -0.001f)
+            assertTrue("no sudden jump at $t: $step after $lastStep", step <= lastStep * 1.6f + 0.5f)
+            last = v; lastStep = step
         }
     }
 
     @Test
-    fun smallChangesAreSpreadOut() {
-        engine.onReading(0, 0x646464, 0)
-        engine.onReading(0, 0x686868, 1_000) // +4: noise
-        assertTrue("not there after the fast time", at(1_000 + FAST_MS, 0)[0] < 103.5f)
-        assertEquals(104f, at(1_000 + SLOW_MS, 0)[0], 0.01f)
+    fun colourChangePassesThroughBrightLight() {
+        engine.onReading(0, 0xc80000, 0)
+        at(3_000, 0)
+        engine.onReading(0, 0x0000c8, 3_000)
+        for (t in 3_000L..3_600L step 8) {
+            val c = at(t, 0)
+            assertTrue("never dimmer than either colour at $t: ${c.toList()}", c[0] + c[2] >= 199f)
+        }
     }
 
     @Test
@@ -56,52 +77,65 @@ class ColourEngineTest {
         engine.onReading(0, 0x0c0c0c, 0) // 12: starts dark, stays off
         assertEquals(0f, at(500, 0)[0], 0f)
         engine.onReading(0, 0x141414, 500) // 20: lights
-        assertEquals(20f, at(1_000, 0)[0], 0.01f)
-        engine.onReading(0, 0x0c0c0c, 1_000) // 12: still lit
-        assertEquals(12f, at(1_500, 0)[0], 0.01f)
-        engine.onReading(0, 0x090909, 1_500) // 9: off
-        assertEquals(0f, at(2_000, 0)[0], 0f)
+        assertEquals(20f, at(2_000, 0)[0], 0.1f)
+        engine.onReading(0, 0x0c0c0c, 2_000) // 12: still lit
+        assertEquals(12f, at(4_000, 0)[0], 0.1f)
+        engine.onReading(0, 0x090909, 4_000) // 9: off, softly
+        assertTrue("fades, not switched off", at(4_016, 0)[0] > 5f)
+        assertEquals(0f, at(6_000, 0)[0], 0f)
     }
 
     @Test
-    fun cutToBlackDarkensZonesNotReadYet() {
-        val t = readAll(0x969696, 0)
-        engine.onReading(0, 0x000000, t + 1_000)
-        assertEquals("one jump is not a cut", 150f, at(t + 1_000 + FAST_MS, 5)[0], 0.01f)
-        engine.onReading(1, 0x000000, t + 1_020)
-        assertEquals("zone 5 dark after the second jump", 0f, at(t + 1_020 + FAST_MS, 5)[0], 0f)
-        assertEquals(0f, at(t + 1_020 + FAST_MS, 13)[0], 0f)
+    fun cutToBlackDarkensZonesNotReadYetTogether() {
+        val t = readAll(0x969696, 0) + 2_000
+        at(t, 0)
+        engine.onReading(0, 0x000000, t)
+        assertTrue("one jump is not a cut", at(t + 20, 5)[0] > 149f)
+        engine.onReading(1, 0x000000, t + 20)
+        val end = t + 20 + s.cutMs.toLong() + 10
+        for (z in listOf(0, 1, 5, 13)) assertTrue("zone $z dark", at(end, z)[0] <= 15f)
     }
 
     @Test
     fun cutToBrighterKeepsEachZonesHue() {
-        val t = readAll(0x281408, 0) // 40, 20, 8
-        engine.onReading(0, 0xa0502a, t + 1_000)
-        engine.onReading(1, 0xa0502a, t + 1_020)
-        val c = at(t + 1_020 + FAST_MS, 7)
+        val t = readAll(0x281408, 0) + 2_000 // 40, 20, 8
+        at(t, 0)
+        engine.onReading(0, 0xa0502a, t)
+        engine.onReading(1, 0xa0502a, t + 20)
+        val c = at(t + 600, 7)
         assertTrue("brighter: ${c[0]}", c[0] > 100f)
         assertEquals("same hue (r:g)", 2f, c[0] / c[1], 0.1f)
     }
 
     @Test
     fun readingAfterACutWinsOverThePrediction() {
-        val t = readAll(0x969696, 0)
-        engine.onReading(0, 0x000000, t + 1_000)
-        engine.onReading(1, 0x000000, t + 1_020)
-        engine.onReading(2, 0x0000c8, t + 1_040) // zone 2 really turned blue
-        assertEquals(200f, at(t + 1_040 + FAST_MS, 2)[2], 0.01f)
+        val t = readAll(0x969696, 0) + 2_000
+        at(t, 0)
+        engine.onReading(0, 0x000000, t)
+        engine.onReading(1, 0x000000, t + 20)
+        engine.onReading(2, 0x0000c8, t + 40) // zone 2 really turned blue
+        assertEquals(200f, at(t + 3_000, 2)[2], 0.1f)
     }
 
     @Test
     fun zonesCatchingUpWithACutAreNotASecondCut() {
-        var t = readAll(0x282828, 0) + 1_000 // 40
+        var t = readAll(0x282828, 0) + 2_000 // 40
         for (z in 0 until zones) { // the whole picture turns to 120, read zone by zone
+            at(t, 0)
             engine.onReading(z, 0x787878, t)
             t += 20
         }
         for (z in 0 until zones) {
-            assertEquals("zone $z stays at its reading", 120f, at(t + 500, z)[0], 0.01f)
+            assertEquals("zone $z stays at its reading", 120f, at(t + 3_000, z)[0], 0.1f)
         }
+    }
+
+    @Test
+    fun stillWhenSettled() {
+        engine.onReading(0, 0x808080, 0)
+        assertTrue(engine.current(100, out))
+        at(5_000, 0)
+        assertTrue("settled", !engine.current(5_008, out))
     }
 
     @Test

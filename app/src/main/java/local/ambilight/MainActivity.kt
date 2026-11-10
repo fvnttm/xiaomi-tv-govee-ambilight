@@ -182,11 +182,16 @@ private fun SettingsScreen(
                 onStep = { d -> change(s.copy(brightness = (s.brightness + 10 * d).coerceIn(10, 100))) },
             )
             SettingRow(
-                "Reakcja", if (s.smooth) "płynna" else "szybka",
-                "Szybka: taśma zmienia kolor niemal razem z obrazem. Płynna: łagodniejsze przejścia, " +
-                    "o około 40 ms wolniejsze.",
+                "Płynność", s.smoothing.label,
+                "Taśma zaczyna zmianę od razu; płynność decyduje, jak miękko dochodzi do nowego koloru. " +
+                    "Dynamiczna: szybko. Standardowa: jak Ambilight. Spokojna: łagodnie. Gaśnie zawsze wolniej, " +
+                    "niż się zapala. Lewo i prawo zmieniają ustawienie.",
                 onHint,
-            ) { change(s.copy(smooth = !s.smooth)) }
+                onStep = { d ->
+                    val all = Smoothing.entries
+                    change(s.copy(smoothing = all[(s.smoothing.ordinal + d).mod(all.size)]))
+                },
+            )
             SettingRow(
                 "Filtr napisów",
                 hint = "Białe i żółte napisy nie rozświetlają środka dolnej krawędzi. Działa przy 4 bokach.",
